@@ -439,39 +439,44 @@ class PutRelativeRandomizer(SceneRandomizer):
             size=object_count,
             replace=False,
         ).tolist()
-        slot_order = list(range(len(_PUT_RELATIVE_SLOTS)))
-        rng.shuffle(slot_order)
+        available_slots = list(range(len(_PUT_RELATIVE_SLOTS)))
+        rng.shuffle(available_slots)
 
         selections: list[dict[str, Any]] = []
         for index, category in enumerate(categories):
             variants = self._get_variants(str(category))
             variant_dir = variants[int(rng.integers(0, len(variants)))]
             metrics = _put_relative_variant_metrics(variant_dir)
-            x, y = _PUT_RELATIVE_SLOTS[slot_order[index]]
             yaw = float(rng.uniform(-np.pi, np.pi))
-            for _ in range(_PUT_RELATIVE_MAX_LAYOUT_TRIES):
-                candidate = {
-                    "name": f"relative_obj_{index + 1:02d}",
-                    "joint": f"relative_obj_{index + 1:02d}_joint",
-                    "category": str(category),
-                    "label": _put_relative_category_label(str(category)),
-                    "variant": variant_dir.name,
-                    "variant_dir": str(variant_dir),
-                    "x": float(x + rng.uniform(-_PUT_RELATIVE_SLOT_JITTER_M, _PUT_RELATIVE_SLOT_JITTER_M)),
-                    "y": float(y + rng.uniform(-_PUT_RELATIVE_SLOT_JITTER_M, _PUT_RELATIVE_SLOT_JITTER_M)),
-                    "z": float(metrics["spawn_z"]),
-                    "yaw": yaw,
-                    "qw": float(np.cos(yaw / 2)),
-                    "qz": float(np.sin(yaw / 2)),
-                    "footprint_radius": float(metrics["footprint_radius"]),
-                }
-                if _put_relative_xy_clearance_ok(
-                    candidate,
-                    selections,
-                    clearance=_PUT_RELATIVE_SPAWN_CLEARANCE_M,
-                ):
-                    selections.append(candidate)
-                    break
+            for slot in available_slots:
+                x, y = _PUT_RELATIVE_SLOTS[slot]
+                for _ in range(_PUT_RELATIVE_MAX_LAYOUT_TRIES):
+                    candidate = {
+                        "name": f"relative_obj_{index + 1:02d}",
+                        "joint": f"relative_obj_{index + 1:02d}_joint",
+                        "category": str(category),
+                        "label": _put_relative_category_label(str(category)),
+                        "variant": variant_dir.name,
+                        "variant_dir": str(variant_dir),
+                        "x": float(x + rng.uniform(-_PUT_RELATIVE_SLOT_JITTER_M, _PUT_RELATIVE_SLOT_JITTER_M)),
+                        "y": float(y + rng.uniform(-_PUT_RELATIVE_SLOT_JITTER_M, _PUT_RELATIVE_SLOT_JITTER_M)),
+                        "z": float(metrics["spawn_z"]),
+                        "yaw": yaw,
+                        "qw": float(np.cos(yaw / 2)),
+                        "qz": float(np.sin(yaw / 2)),
+                        "footprint_radius": float(metrics["footprint_radius"]),
+                    }
+                    if _put_relative_xy_clearance_ok(
+                        candidate,
+                        selections,
+                        clearance=_PUT_RELATIVE_SPAWN_CLEARANCE_M,
+                    ):
+                        selections.append(candidate)
+                        break
+                else:
+                    continue
+                available_slots.remove(slot)
+                break
             else:
                 raise RuntimeError("put_relative could not place non-overlapping objects")
         return selections
