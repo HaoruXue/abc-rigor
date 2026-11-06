@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
 
 # Every task in this catalogue is assembled from the one bimanual scene family, so the
 # scene name exported alongside an episode is a constant rather than a per-spec field.
@@ -89,7 +89,10 @@ _TASK_SPECS: tuple[SimTaskSpec, ...] = (
         name="count_into_opaque_box",
         env_task="count_into_opaque_box",
         prompt="put the prompted number of objects in the opaque box",
-        description="Follow a sampled counting directive into the opaque box; the scene randomizer writes the live prompt each episode.",
+        description=(
+            "Follow a sampled counting directive into the opaque box; "
+            "the scene randomizer writes the live prompt each episode."
+        ),
         evaluator_name="count_into_opaque_box",
         aliases=("sim_count_into_opaque_box",),
     ),
@@ -167,7 +170,10 @@ _TASK_SPECS: tuple[SimTaskSpec, ...] = (
         name="grab_specific_object_from_clutter",
         env_task="grab_clutter",
         prompt="grab the target object from the cluttered table and place it in the box",
-        description="Grab the prompted target object from a cluttered tabletop full of distractors and place it in the target box.",
+        description=(
+            "Grab the prompted target object from a cluttered tabletop full of distractors "
+            "and place it in the target box."
+        ),
         evaluator_name="grab_clutter_target_in_box",
         aliases=(
             "grab_clutter",
@@ -183,7 +189,10 @@ _TASK_SPECS: tuple[SimTaskSpec, ...] = (
         name="ball_tray_balancing",
         env_task="ball_tray_balancing",
         prompt="grab the tray handles and keep the ball balanced on the tray",
-        description="Grab a tabletop tray by its handles and keep a ball balanced on the open tray for low-latency policy inference testing.",
+        description=(
+            "Grab a tabletop tray by its handles and keep a ball balanced on the open tray for "
+            "low-latency policy inference testing."
+        ),
         evaluator_name="ball_tray_balancing",
         aliases=(
             "ball tray balancing",
@@ -199,7 +208,10 @@ _TASK_SPECS: tuple[SimTaskSpec, ...] = (
         name="inhand_transfer_item_to_other_side",
         env_task="inhand_transfer",
         prompt="inhand transfer the item to other side",
-        description="Pick the sampled kitchen tool with the near arm, pass it to the other hand, and set it down on the far side of the table.",
+        description=(
+            "Pick the sampled kitchen tool with the near arm, pass it to the other hand, and "
+            "set it down on the far side of the table."
+        ),
         evaluator_name="inhand_transfer_other_side",
         aliases=(
             "inhand_transfer",
@@ -213,7 +225,10 @@ _TASK_SPECS: tuple[SimTaskSpec, ...] = (
         name="multi_drawer_search",
         env_task="multi_drawer_search",
         prompt="find the target object hidden in one of the drawers and place it in the bin",
-        description="Remember objects seen across several drawers, then find and place a prompted sequence of them into the bin.",
+        description=(
+            "Remember objects seen across several drawers, then find and place "
+            "a prompted sequence of them into the bin."
+        ),
         evaluator_name="multi_drawer_target_in_bin",
         aliases=(
             "drawer search",
@@ -406,6 +421,18 @@ _TASK_SPECS: tuple[SimTaskSpec, ...] = (
         evaluator_name="spell_word",
         evaluator_options=(("word", "agi"),),
         aliases=("sim_spell_agi",),
+    ),
+    *(
+        SimTaskSpec(
+            name=f"spell_random_{length}",
+            env_task="blocks",
+            prompt=f"spell the sampled {length}-letter sequence",
+            evaluator_name="spell_word",
+            evaluator_options=(("sequence_length", length),),
+            reset_request=(("sequence_length", length),),
+            description="Spell a seeded sequence of distinct letters; the reset records the exact goal.",
+        )
+        for length in (2, 3, 4)
     ),
 )
 
