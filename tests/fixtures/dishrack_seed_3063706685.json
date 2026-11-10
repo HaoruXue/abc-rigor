@@ -1,0 +1,220 @@
+{
+  "seed": 3063706685,
+  "variants": {
+    "plate": [
+      "plate_0",
+      "plate_1",
+      "plate_2",
+      "plate_3",
+      "plate_4",
+      "plate_5",
+      "plate_6",
+      "plate_7",
+      "plate_8",
+      "plate_9",
+      "plate_10",
+      "plate_11",
+      "plate_12",
+      "plate_13",
+      "plate_14",
+      "plate_15",
+      "plate_16",
+      "plate_17",
+      "plate_18",
+      "plate_19",
+      "plate_20"
+    ],
+    "dish_rack": [
+      "dish_rack_0",
+      "dish_rack_1",
+      "dish_rack_2",
+      "dish_rack_3",
+      "dish_rack_4",
+      "dish_rack_5",
+      "dish_rack_6",
+      "dish_rack_7",
+      "dish_rack_8",
+      "dish_rack_9",
+      "dish_rack_11",
+      "dish_rack_12"
+    ]
+  },
+  "selected": {
+    "variants": {
+      "dish_rack": "dish_rack_11",
+      "plate": "plate_12"
+    },
+    "plate_variants": [
+      "plate_12",
+      "plate_10",
+      "plate_11",
+      "plate_11"
+    ],
+    "scales": {
+      "dishrack": 1.0330061172788736,
+      "plate_joint": 0.9521752308672194,
+      "plate_joint_1": 1.0112828635154605,
+      "plate_joint_2": 0.9891416957702756,
+      "plate_joint_3": 1.034878626732924
+    },
+    "plate_radii": [
+      0.0888840719023075,
+      0.09445094420353815,
+      0.09149560803789952,
+      0.09572627420646719
+    ],
+    "rack_half_extents_xy": [
+      0.26303991405130966,
+      0.1703040735740648
+    ],
+    "table_bounds": [
+      0.36,
+      0.82,
+      -0.55,
+      0.55
+    ],
+    "physical_table_bounds": [
+      0.3025,
+      0.8975,
+      -0.65,
+      0.65
+    ],
+    "nominals": {
+      "dishrack": [
+        [
+          0.62,
+          -0.24,
+          0.75
+        ],
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      ],
+      "plate_joint": [
+        [
+          0.5,
+          0.2,
+          0.75
+        ],
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      ],
+      "plate_joint_1": [
+        [
+          0.72,
+          0.2,
+          0.75
+        ],
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      ],
+      "plate_joint_2": [
+        [
+          0.5,
+          0.44,
+          0.75
+        ],
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      ],
+      "plate_joint_3": [
+        [
+          0.72,
+          0.44,
+          0.75
+        ],
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      ]
+    }
+  },
+  "accepted_state": {
+    "dishrack": {
+      "pos": [
+        0.6057509264598909,
+        0.32603486919811026,
+        0.75
+      ],
+      "quat": [
+        0.0019652460369767046,
+        0.0,
+        0.0,
+        0.9999980689021425
+      ]
+    },
+    "plate_joint": {
+      "pos": [
+        0.43117234953801353,
+        -0.43333366157701564,
+        0.75
+      ],
+      "quat": [
+        0.9967951483945593,
+        0.0,
+        0.0,
+        -0.07999645077794768
+      ]
+    },
+    "plate_joint_1": {
+      "pos": [
+        0.7221152666567368,
+        -0.07596343686312418,
+        0.75
+      ],
+      "quat": [
+        0.10567878353217953,
+        0.0,
+        0.0,
+        -0.9944003191427278
+      ]
+    },
+    "plate_joint_2": {
+      "pos": [
+        0.6833444339768775,
+        -0.35630170618826795,
+        0.75
+      ],
+      "quat": [
+        0.8505644976476735,
+        0.0,
+        0.0,
+        -0.5258707401456758
+      ]
+    },
+    "plate_joint_3": {
+      "pos": [
+        0.4819589416704276,
+        -0.09975746510814776,
+        0.75
+      ],
+      "quat": [
+        0.8010562828401867,
+        0.0,
+        0.0,
+        -0.598589034081199
+      ]
+    }
+  },
+  "accepted_proposal": 405,
+  "first_200_proposals_sha256": "2b445a73cad2f4413b9de4e2860b64d877f0cef72b98cc3782a3535c189ac9ee",
+  "scope": "Geometry captured from the native dish-rack reset. Tests use matching box/cylinder geometry and no asset downloads."
+}

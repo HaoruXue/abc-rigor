@@ -31,6 +31,8 @@ from ..core import (
 from ..requests import DishRackResetRequest
 
 class DishRackRandomizer(SceneRandomizer):
+    # Bound rejection effort for large racks with four-plate layouts.
+    max_tries = 2_000
     min_clearance_m = 0.1
     rack_plate_margin_m = 0.02
     plate_plate_margin_m = 0.02
