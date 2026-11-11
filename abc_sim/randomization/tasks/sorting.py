@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from pathlib import Path as _Path
 from typing import Any
 
@@ -18,6 +19,7 @@ from ..core import (
     ScalePerturbRange,
     SceneRandomizer,
 )
+from ..requests import LegoBlocksResetRequest, NutsBoltsResetRequest, SortingResetRequest
 from .count_box import _count_box_apply_scene_transforms
 
 _NUTS_BOLTS_MAX_OBJECTS_PER_TYPE = 20
@@ -59,6 +61,7 @@ class _VariableCountSortingRandomizer(_ScaleAwareTabletopRandomizer):
     bin_body_names: tuple[str, ...] = ()
     candidate_object_body_names: tuple[str, ...] = ()
     _parked_joints: tuple[str, ...] = ()
+    reset_request_cls: type[SortingResetRequest]
 
     def __init__(self) -> None:
         super().__init__()
@@ -75,6 +78,7 @@ class _VariableCountSortingRandomizer(_ScaleAwareTabletopRandomizer):
     def _sample_active_object_body_names(
         self,
         rng: np.random.Generator,
+        request: SortingResetRequest | None = None,
     ) -> tuple[tuple[str, ...], dict[str, Any]]:
         raise NotImplementedError
 
@@ -172,10 +176,10 @@ class _VariableCountSortingRandomizer(_ScaleAwareTabletopRandomizer):
         request: Any | None = None,
     ) -> RandomizationState:
         rng = np.random.default_rng(seed)
-        options = request if isinstance(request, dict) else {}
-        active_object_body_names, metadata = self._sample_active_object_body_names(rng)
+        options = self.reset_request_cls.from_value(request)
+        active_object_body_names, metadata = self._sample_active_object_body_names(rng, options)
         body_pose_source_names = self._sample_body_pose_source_names(active_object_body_names, rng)
-        style = options.get("bin_visual_style")
+        style = options.bin_visual_style
         bin_visual_styles = (
             {name: str(style) for name in self.bin_body_names}
             if style
@@ -185,12 +189,12 @@ class _VariableCountSortingRandomizer(_ScaleAwareTabletopRandomizer):
             active_object_body_names,
             body_pose_source_names=body_pose_source_names,
             bin_visual_styles=bin_visual_styles,
-            park_inactive=bool(options.get("park_inactive", False)),
+            park_inactive=options.park_inactive,
         )
-        if not options.get("randomize_scales", True):
+        if not options.randomize_scales:
             self._reload_configured_scene()
             model, data = self._env_ref.model, self._env_ref.data
-        state = super().randomize(model, data, seed=seed, request=request)
+        state = super().randomize(model, data, seed=seed, request=asdict(options))
         state.object_states.update(self._parked_states())
         state.metadata.update(metadata)
         state.metadata["active_object_joints"] = [
@@ -222,6 +226,7 @@ class _VariableCountSortingRandomizer(_ScaleAwareTabletopRandomizer):
 class NutsBoltsSortingRandomizer(_VariableCountSortingRandomizer):
     """Shuffle loose nuts and bolts in the tabletop sorting workspace."""
 
+    reset_request_cls = NutsBoltsResetRequest
     base_scene_xml_path = _MODELS_DIR / "yam_nuts_bolts_sorting_scene.xml"
     bin_body_names = _NUTS_BOLTS_BIN_BODY_NAMES
     candidate_object_body_names = (
@@ -279,10 +284,20 @@ class NutsBoltsSortingRandomizer(_VariableCountSortingRandomizer):
     def _sample_active_object_body_names(
         self,
         rng: np.random.Generator,
+        request: NutsBoltsResetRequest | None = None,
     ) -> tuple[tuple[str, ...], dict[str, Any]]:
+        request = NutsBoltsResetRequest.from_value(request)
         count_min, count_max = _NUTS_BOLTS_OBJECT_COUNT_RANGE
-        nut_count = int(rng.integers(count_min, count_max + 1))
-        bolt_count = int(rng.integers(count_min, count_max + 1))
+        nut_count = (
+            request.nut_count
+            if request.nut_count is not None
+            else int(rng.integers(count_min, count_max + 1))
+        )
+        bolt_count = (
+            request.bolt_count
+            if request.bolt_count is not None
+            else int(rng.integers(count_min, count_max + 1))
+        )
         nut_indices = sorted(
             int(index)
             for index in rng.choice(
@@ -316,6 +331,7 @@ class NutsBoltsSortingRandomizer(_VariableCountSortingRandomizer):
 class LegoBlocksSortingRandomizer(_VariableCountSortingRandomizer):
     """Shuffle loose LEGO-style blocks in the tabletop sorting workspace."""
 
+    reset_request_cls = LegoBlocksResetRequest
     base_scene_xml_path = _MODELS_DIR / "yam_lego_blocks_sorting_scene.xml"
     bin_body_names = _LEGO_BIN_BODY_NAMES
     candidate_object_body_names = tuple(
@@ -359,12 +375,18 @@ class LegoBlocksSortingRandomizer(_VariableCountSortingRandomizer):
     def _sample_active_object_body_names(
         self,
         rng: np.random.Generator,
+        request: LegoBlocksResetRequest | None = None,
     ) -> tuple[tuple[str, ...], dict[str, Any]]:
+        request = LegoBlocksResetRequest.from_value(request)
         count_min, count_max = _LEGO_BLOCKS_PER_COLOR_COUNT_RANGE
         active_body_names: list[str] = []
         active_counts: dict[str, int] = {}
         for color in _LEGO_COLORS:
-            count = int(rng.integers(count_min, count_max + 1))
+            count = (
+                request.blocks_per_color
+                if request.blocks_per_color is not None
+                else int(rng.integers(count_min, count_max + 1))
+            )
             active_counts[color] = count
             indices = sorted(
                 int(index)
