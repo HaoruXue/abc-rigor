@@ -15,7 +15,11 @@ from abc_sim.rendering.replay.renderer import (
     RendererWrapper,
     WarpReplayRuntime,
 )
-from abc_sim.task_eval import TaskEvalResult, make_task_evaluator
+from abc_sim.task_eval import (
+    PhysicsObservedTaskEvaluator,
+    TaskEvalResult,
+    make_task_evaluator,
+)
 
 # Compiled geometry every world in a batch must agree on.
 SHARED_MODEL_FIELDS = (
@@ -96,6 +100,10 @@ class BatchedWarpYAMEnv:
     ):
         if num_worlds < 1:
             raise ValueError(f"num_worlds must be >= 1, got {num_worlds}")
+        if isinstance(base_env._task_evaluator, PhysicsObservedTaskEvaluator):
+            raise NotImplementedError(
+                "This task requires per-step solved contact observations, which MJWarp replay does not provide."
+            )
         if base_env._task_runtime is not None:
             raise NotImplementedError(
                 f"task {base_env._task!r} has a per-step task runtime, which is not batched"
