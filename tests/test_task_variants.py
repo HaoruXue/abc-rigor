@@ -95,6 +95,57 @@ class TaskVariantTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             registry.register(replace(variant, base_task="absent"))
 
+    def test_scene_namespace_is_reserved_and_rejection_is_atomic(self):
+        from abc_sim.task_registry import list_scene_task_names
+
+        registry = TaskSpecRegistry(list_task_specs())
+        variant = BottleThroughputTask().task_spec()
+        for scene_name in list_scene_task_names(include_aliases=True):
+            for field in ("name", "aliases", "prompt"):
+                alias = f"unpublished_{scene_name}_{field}"
+                fields = {"name": variant.name, "aliases": (alias,)}
+                fields[field] = (
+                    (alias, scene_name.upper()) if field == "aliases" else scene_name
+                )
+                with self.subTest(scene=scene_name, field=field):
+                    with self.assertRaises(ValueError):
+                        registry.register(replace(variant, **fields))
+                    with self.assertRaises(KeyError):
+                        registry.get(alias)
+                    self.assertEqual(registry.variants(), ())
+                    self.assertEqual(
+                        registry.get("spell_cat"), get_task_spec("spell_cat")
+                    )
+
+    def test_rejected_scene_alias_preserves_original_spelling_resolution(self):
+        from abc_sim.task_registry import (
+            get_task_scene_xml,
+            resolve_env_task_name,
+            resolve_task,
+        )
+
+        before = abc_sim.list_task_variants()
+        rejected_name = "rejected_scene_alias_probe_v1"
+        with self.assertRaisesRegex(ValueError, "reserved"):
+            abc_sim.register_task_spec(
+                replace(
+                    BottleThroughputTask().task_spec(),
+                    name=rejected_name,
+                    aliases=("blocks",),
+                )
+            )
+        self.assertEqual(abc_sim.list_task_variants(), before)
+        with self.assertRaises(KeyError):
+            get_task_spec(rejected_name)
+        self.assertEqual(resolve_env_task_name("blocks"), "blocks")
+        self.assertEqual(resolve_env_task_name("water_bottles"), "put_bottles")
+        resolved = resolve_task("spell_cat")
+        self.assertEqual(resolved.env_task, "blocks")
+        self.assertEqual(resolved.scene_task.name, "blocks")
+        self.assertEqual(resolved.scene_task.scene_xml.name, "yam_blocks_scene.xml")
+        self.assertEqual(get_task_scene_xml("spell_cat"), resolved.scene_task.scene_xml)
+        self.assertEqual(get_task_spec("spell_cat").evaluator_name, "spell_word")
+
     def test_all_existing_count_and_horizon_identities(self):
         conditions = [
             *(

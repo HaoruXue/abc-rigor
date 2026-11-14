@@ -5,6 +5,9 @@ IDs, prompts, aliases, reset defaults and evaluators. Explicit variants are
 registered and listed separately. Registration checks all normalized names,
 aliases and prompts before publishing any key. Repeating the same definition
 is allowed; changing a definition under an existing key fails.
+Existing low-level scene names and aliases are reserved for their original
+owners. Registration cannot give `blocks`, `drawer`, `empty`, or another
+scene identity a new task meaning.
 
 A variant may reuse its canonical base task's prompt. That shared prompt
 continues to select the base task. It must not be a variant name or alias.
@@ -62,6 +65,19 @@ The native hook samples direct table support once after every physics tick.
 Geometry and original spelling diagnostics are scored every 17 ticks;
 evaluator reads return the latest scheduled result and never sample again.
 The first result therefore requires 17 ticks, including terminal-drain paths.
+High-level `step()` and `step_chunk()` require an integer control decimation
+of at least 17 for this evaluator. Unsupported cadence is rejected before
+task binding, reset or action execution. Low-level `advance_physics(16)` then
+`advance_physics(1)` remains supported; the intervening result read raises
+until the first scheduled sample. Cadences need not be multiples of 17:
+results retain the latest sample from the fixed 17-tick schedule.
+Low-level action collectors use `apply_action(action, physics_steps=1)` to
+assign native actuator controls and advance exactly one tick. This method
+accepts a positive integer tick count, runs the same mapping and physics hooks
+as `step()`, and increments `cur_step` once per action call. It does not render,
+read a score or decide episode termination. Construct such an environment
+with a supported high-level cadence and let the collector honor score
+readiness and simulated-time horizons explicitly.
 Fresh baseline positions and support tracking are bound after completed reset,
 goal/model rebinding and reset settling. Ordinary tasks use the native loop
 without per-tick observer work.
@@ -81,10 +97,21 @@ conservative score under `spelling_placement`. `original_spell_reward` and
 The new result uses the native float32 `TaskEvalResult` reward container; the
 unrounded conservative scalar remains in the saved score. Historical
 downstream reward labels and results are not renamed.
+Each result read owns a detached diagnostic snapshot. Mutating an exported
+info payload cannot change the evaluator's inventory, reset baseline, cached
+sample or subsequent scores. Result values are stable between scheduled
+samples; object identity is not part of the read contract.
 
 Qpos-only replay and `BatchedWarpYAMEnv` explicitly reject this contact-dependent
 variant. They cannot reconstruct its measured support history. This restriction
 does not change original spelling task support.
+
+The existing `abc_minimal` policy harness is not a supported route for these
+versioned conditions: it reads scores immediately after reset and does not
+enforce the declared variant horizon. Adoption of that harness is deferred.
+One-model collectors separately own readiness, horizon enforcement and
+zero-action or sub-17-tick terminal records, without fabricated measured
+rewards, dropped samples, duplicate sampling or hidden physics.
 
 ## Validation scope
 

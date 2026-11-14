@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import string
+from copy import deepcopy
 from dataclasses import asdict
 
 import mujoco
@@ -120,7 +121,7 @@ class FreePlacementSpellingEvaluator:
             raise RuntimeError(
                 "Wait for the first scheduled spelling evaluation after reset."
             )
-        return self._result
+        return deepcopy(self._result)
 
     def _score_model_data(self, data: mujoco.MjData) -> TaskEvalResult:
         quat = np.asarray(
@@ -129,11 +130,13 @@ class FreePlacementSpellingEvaluator:
         local_x_up = 2 * (quat[:, 1] * quat[:, 3] - quat[:, 0] * quat[:, 2])
         frame = {
             "word": self.word,
-            "letters": self._letters,
+            "letters": self._letters.copy(),
             "positions": self._positions(data),
-            "initial_positions": self._initial_positions,
+            "initial_positions": [
+                position.copy() for position in self._initial_positions
+            ],
             "face_up": (np.abs(local_x_up) >= self.cfg.upright_dot_min).tolist(),
-            "supported": self._support["eligible"],
+            "supported": self._support["eligible"].copy(),
         }
         score = score_free_placement(self.cfg, **frame)
         original = self._native.evaluate_qpos_batch(np.asarray(data.qpos)[None, :])
@@ -153,7 +156,7 @@ class FreePlacementSpellingEvaluator:
                     "configuration": asdict(self.cfg),
                     "frame": frame,
                     "score": score,
-                    "support": self._support,
+                    "support": deepcopy(self._support),
                 },
                 "original_spell_reward": original.reward,
                 "original_spell_success": original.success,

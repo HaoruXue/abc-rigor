@@ -315,6 +315,7 @@ class MuJoCoYAMEnv(gym.Env):
         options: Optional[dict[str, Any]] = None,
         randomize: bool = True,
     ):
+        self._validate_control_decimation(self._task_evaluator)
         if (
             self._task_spec is not None
             and self._task_spec.version is not None
@@ -410,6 +411,7 @@ class MuJoCoYAMEnv(gym.Env):
         state is advanced.
         """
 
+        self._validate_control_decimation(self._task_evaluator)
         obs = self._apply_single_action(action, render_obs=render_obs)
         reward, info = self._task_step_info()
         terminated, truncated = self._episode_status(info)
@@ -447,12 +449,22 @@ class MuJoCoYAMEnv(gym.Env):
         *,
         render_obs: bool,
     ) -> dict[str, Any] | None:
-        action = self._as_single_action(action_14d)
-        self._step_single(action)
-        self.cur_step += 1
+        self.apply_action(action_14d, physics_steps=self._control_decimation)
         if not render_obs:
             return None
         return self.get_obs()
+
+    def apply_action(self, action: np.ndarray, *, physics_steps: int) -> None:
+        """Apply one policy action for an explicit positive integer physics count.
+
+        Uses the native actuator mapping and task runtime/observer hooks.
+        Increments ``cur_step`` once, without rendering, scoring or checking
+        episode termination. The caller owns score readiness and horizons.
+        """
+        if type(physics_steps) is not int or physics_steps <= 0:
+            raise ValueError("physics_steps must be a positive integer")
+        self._step_single(self._as_single_action(action), physics_steps=physics_steps)
+        self.cur_step += 1
 
     def _as_single_action(self, action_14d: np.ndarray) -> np.ndarray:
         action = np.asarray(action_14d, dtype=np.float32)
@@ -539,7 +551,7 @@ class MuJoCoYAMEnv(gym.Env):
             )
         return self.get_init_q().astype(np.float32, copy=True)
 
-    def _step_single(self, action_14d: np.ndarray):
+    def _step_single(self, action_14d: np.ndarray, *, physics_steps: int):
         """Apply a single 14D action and step physics."""
         ctrl = np.zeros(self.model.nu)
         for i in range(self.single_timestep_action_dim):
@@ -549,7 +561,7 @@ class MuJoCoYAMEnv(gym.Env):
                 val = val * _GRIPPER_CTRL_MAX
             ctrl[self._ctrl_indices[i]] = val
         self.data.ctrl[:] = ctrl
-        self.advance_physics()
+        self.advance_physics(physics_steps)
 
     def advance_physics(self, steps: int | None = None) -> None:
         """Advance MuJoCo physics while applying any task runtime controls."""
@@ -603,16 +615,32 @@ class MuJoCoYAMEnv(gym.Env):
         """Configure the task name and attach any registered evaluator."""
 
         resolved = resolve_task(task)
+        task_spec = resolved.task_spec or maybe_get_task_spec(task)
+        evaluator = make_task_evaluator(self.model, task_spec)
+        self._validate_control_decimation(evaluator)
         self._task_request = task
         self._task = resolved.env_task or task
-        self._task_spec = resolved.task_spec or maybe_get_task_spec(task)
-        self._task_evaluator = make_task_evaluator(self.model, self._task_spec)
+        self._task_spec = task_spec
+        self._task_evaluator = evaluator
         self._physics_observer = None
         self._task_runtime = make_task_runtime(
             resolved.task_spec or self._task,
             self.model,
             self.data,
         )
+
+    def _validate_control_decimation(self, evaluator) -> None:
+        if isinstance(evaluator, PhysicsObservedTaskEvaluator):
+            minimum = evaluator.evaluation_interval_steps
+            if (
+                type(self._control_decimation) is not int
+                or self._control_decimation < minimum
+            ):
+                raise ValueError(
+                    f"control_decimation must be an integer >= {minimum} for "
+                    f"{evaluator.spec.name!r}; use apply_action or advance_physics "
+                    "for shorter low-level steps."
+                )
 
     def task_runtime_debug_state(self) -> dict[str, Any] | None:
         """Return task runtime diagnostics, when a runtime is attached."""

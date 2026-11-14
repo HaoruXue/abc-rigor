@@ -187,9 +187,7 @@ def make_env(
     from abc_sim.config import get_i2rt_sim_config
     from abc_sim.env import MuJoCoYAMEnv
     from abc_sim.task_registry import (
-        get_task_physics_defaults,
         get_task_randomizer,
-        get_task_scene_xml,
         list_scene_task_names,
         resolve_task,
     )
@@ -199,6 +197,11 @@ def make_env(
 
     resolved_task = resolve_task(task)
     env_task = resolved_task.env_task or task
+    physics_defaults = (
+        resolved_task.scene_task.physics_kwargs()
+        if resolved_task.scene_task is not None
+        else {}
+    )
     resolved_prompt = prompt
     if resolved_prompt is None:
         if resolved_task.task_spec is not None:
@@ -242,7 +245,7 @@ def make_env(
         xml = _inhand_apply_scene_transforms(xml, scene_xml_transform_options)
 
         physics_kwargs = {
-            **get_task_physics_defaults(env_task),
+            **physics_defaults,
             **kwargs,
             "max_episode_steps": max_episode_steps,
             "terminate_on_success": terminate_on_success,
@@ -258,7 +261,11 @@ def make_env(
             **physics_kwargs,
         )
         env.reload_from_xml(xml)
-        env.set_task(task)
+        try:
+            env.set_task(task)
+        except BaseException:
+            env.close()
+            raise
         env._inhand_category = category
         env._inhand_variant = variant_dir.name
 
@@ -271,7 +278,12 @@ def make_env(
         env._task_randomizer = randomizer
         return env
 
-    scene_xml_path = Path(scene_xml) if scene_xml is not None else get_task_scene_xml(env_task)
+    if scene_xml is not None:
+        scene_xml_path = Path(scene_xml)
+    elif resolved_task.scene_task is not None:
+        scene_xml_path = resolved_task.scene_task.scene_xml
+    else:
+        scene_xml_path = None
     if scene_xml_path is None:
         raise ValueError(
             f"Unknown task '{task}'. Available: {list(list_scene_task_names())}"
@@ -294,7 +306,7 @@ def make_env(
 
     config = get_i2rt_sim_config()
     physics_kwargs = {
-        **get_task_physics_defaults(env_task),
+        **physics_defaults,
         **kwargs,
         "max_episode_steps": max_episode_steps,
         "terminate_on_success": terminate_on_success,
@@ -313,7 +325,11 @@ def make_env(
     finally:
         if tmp_scene_xml_path is not None:
             tmp_scene_xml_path.unlink(missing_ok=True)
-    env.set_task(task)
+    try:
+        env.set_task(task)
+    except BaseException:
+        env.close()
+        raise
     env._task_reset_request = (
         resolved_task.task_spec.reset_request_options() if resolved_task.task_spec is not None else None
     )

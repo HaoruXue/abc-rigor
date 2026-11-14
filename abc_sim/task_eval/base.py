@@ -90,6 +90,8 @@ class TaskEvaluator(Protocol):
 class PhysicsObservedTaskEvaluator(TaskEvaluator, Protocol):
     """Single-world evaluation that requires each solved native physics step."""
 
+    evaluation_interval_steps: int
+
     def after_reset(self, model: Any, data: Any) -> None:
         """Bind fresh baseline state after reset randomization and settling."""
 

@@ -6,6 +6,8 @@ import re
 import math
 from dataclasses import dataclass
 
+from abc_sim.task_registry import list_scene_task_names
+
 # Every task in this catalogue is assembled from the one bimanual scene family, so the
 # scene name exported alongside an episode is a constant rather than a per-spec field.
 # The internal sim datasets record it, so exports have to carry it too.
@@ -492,6 +494,9 @@ class TaskSpecRegistry:
     def __init__(self, specs: tuple[SimTaskSpec, ...] = ()) -> None:
         self._lookup: dict[str, SimTaskSpec] = {}
         self._specs: dict[str, SimTaskSpec] = {}
+        self._scene_keys = {
+            _normalize_key(name) for name in list_scene_task_names(include_aliases=True)
+        }
         for spec in specs:
             self.register(spec)
 
@@ -517,6 +522,8 @@ class TaskSpecRegistry:
         else:
             keys.add(prompt_key)
         for key in keys:
+            if key in self._scene_keys and spec not in _TASK_SPECS:
+                raise ValueError(f"Task key {key!r} is reserved for an existing scene.")
             existing = self._lookup.get(key)
             if existing is not None and existing != spec:
                 raise ValueError(

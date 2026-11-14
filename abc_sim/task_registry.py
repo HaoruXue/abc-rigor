@@ -5,9 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from abc_sim.task_specs import SimTaskSpec, maybe_get_task_spec
+if TYPE_CHECKING:
+    from abc_sim.task_specs import SimTaskSpec
 
 
 _MODELS_DIR = Path(__file__).parent / "models"
@@ -96,19 +97,24 @@ def list_scene_tasks() -> tuple[SceneTaskSpec, ...]:
     return _SCENE_TASKS
 
 
-def list_scene_task_names() -> tuple[str, ...]:
-    """Return all valid low-level scene task names."""
+def list_scene_task_names(*, include_aliases: bool = False) -> tuple[str, ...]:
+    """Return low-level scene names, optionally including their public aliases."""
 
-    return tuple(spec.name for spec in _SCENE_TASKS)
+    names = tuple(spec.name for spec in _SCENE_TASKS)
+    return (*names, *_SCENE_TASK_ALIASES) if include_aliases else names
 
 
 def resolve_env_task_name(task: str | SimTaskSpec | None) -> str | None:
     """Resolve a user-facing task or prompt alias into a scene task name."""
 
+    from abc_sim.task_specs import SimTaskSpec, maybe_get_task_spec
+
     if task is None:
         return None
     if isinstance(task, SimTaskSpec):
         return _SCENE_TASK_ALIASES.get(task.env_task, task.env_task)
+    if task in _SCENE_TASK_LOOKUP or task in _SCENE_TASK_ALIASES:
+        return _SCENE_TASK_ALIASES.get(task, task)
 
     spec = maybe_get_task_spec(task)
     if spec is not None:
@@ -137,6 +143,8 @@ def get_scene_task_spec(task: str | SimTaskSpec) -> SceneTaskSpec:
 
 def resolve_task(task: str | SimTaskSpec | None) -> ResolvedTask:
     """Resolve prompt/task aliases into both task-spec and scene-task data."""
+
+    from abc_sim.task_specs import SimTaskSpec, maybe_get_task_spec
 
     request_name: str | None
     if task is None:

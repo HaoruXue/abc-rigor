@@ -3,8 +3,9 @@
 import importlib.util
 import string
 import unittest
+from copy import deepcopy
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from abc_sim.spelling_placement import FreePlacementSpellingCfg, SpellingTableSupport
 
@@ -147,7 +148,12 @@ class NativeSpellingPlacementTests(unittest.TestCase):
             '<body name="wrist_camera" pos="12 0 0">'
             '<geom name="camera_geom" type="box" size=".01 .01 .01"/></body>'
             + "".join(bodies)
-            + "</worldbody></mujoco>"
+            + "</worldbody><actuator>"
+            + "".join(
+                f'<motor joint="block_{letter}_jnt" gear="0 0 0 0 0 0"/>'
+                for letter in string.ascii_uppercase[:14]
+            )
+            + "</actuator></mujoco>"
         )
         self.data = mujoco.MjData(self.model)
         self.evaluator = make_task_evaluator(self.model, free_placement_spelling_task())
@@ -163,6 +169,10 @@ class NativeSpellingPlacementTests(unittest.TestCase):
         self.env._physics_observer = self.evaluator.after_physics_step
         self.env._task_spec = self.evaluator.spec
         self.env._control_decimation = 34
+        self.env.single_timestep_action_dim = 14
+        self.env._ctrl_indices = list(reversed(range(14)))
+        self.env._gripper_set = {6, 13}
+        self.env.chunk_dim = 2
         self.env._task_start_time = float(self.data.time)
         self.env.cur_step = 0
         self.env.max_episode_steps = None
@@ -190,7 +200,11 @@ class NativeSpellingPlacementTests(unittest.TestCase):
             self.assertEqual(support.call_count, 17)
             self.assertEqual(scoring.call_count, 1)
             for _ in range(4):
-                self.assertIs(self.env.evaluate_task(), first)
+                subsequent = self.env.evaluate_task()
+                self.assertIsNot(subsequent, first)
+                self.assertEqual(
+                    subsequent.to_info(squeeze=True), first.to_info(squeeze=True)
+                )
             self.assertEqual(support.call_count, 17)
             self.assertEqual(scoring.call_count, 1)
             self.env.advance_physics()
@@ -219,6 +233,238 @@ class NativeSpellingPlacementTests(unittest.TestCase):
         )
         self.assertEqual(evidence["score"]["reward"], 1)
         self.assertEqual(evidence["contact_scope"], "finger-subtrees-v1")
+
+    def test_short_high_level_cadence_rejects_before_reset_step_or_chunk_mutation(self):
+        import numpy as np
+
+        for decimation in range(1, 17):
+            self.env._control_decimation = decimation
+            for route in ("reset", "step", "step_chunk"):
+                with self.subTest(decimation=decimation, route=route):
+                    before = (
+                        float(self.data.time),
+                        self.env.cur_step,
+                        self.evaluator._physics_steps,
+                    )
+                    observer = self.env._physics_observer
+                    with (
+                        patch.object(
+                            self.env,
+                            "_get_reset_arm_state",
+                            side_effect=AssertionError("reset mutated"),
+                        ),
+                        patch.object(
+                            self.env,
+                            "_apply_single_action",
+                            side_effect=AssertionError("action applied"),
+                        ),
+                        self.assertRaisesRegex(ValueError, "control_decimation.*>= 17"),
+                    ):
+                        if route == "reset":
+                            self.env.reset(seed=37)
+                        elif route == "step":
+                            self.env.step(np.zeros(14), render_obs=False)
+                        else:
+                            self.env.step_chunk(np.zeros((2, 14)))
+                    self.assertEqual(
+                        before,
+                        (
+                            float(self.data.time),
+                            self.env.cur_step,
+                            self.evaluator._physics_steps,
+                        ),
+                    )
+                    self.assertIs(self.env._physics_observer, observer)
+
+    def test_short_cadence_cannot_replace_a_bound_task(self):
+        self.env._task_request, self.env._task = "previous request", "blocks"
+        self.env._control_decimation = 1
+        before = (
+            self.env._task_request,
+            self.env._task,
+            self.env._task_spec,
+            self.env._task_evaluator,
+        )
+        with (
+            patch(
+                "abc_sim.env.make_task_runtime",
+                side_effect=AssertionError("runtime bound"),
+            ),
+            self.assertRaisesRegex(ValueError, "control_decimation.*>= 17"),
+        ):
+            self.env.set_task(self.evaluator.spec)
+        self.assertEqual(
+            before,
+            (
+                self.env._task_request,
+                self.env._task,
+                self.env._task_spec,
+                self.env._task_evaluator,
+            ),
+        )
+
+    def test_factory_rejects_short_cadence_and_closes_the_unbound_environment(self):
+        import abc_sim
+
+        self.env._control_decimation = 1
+        with (
+            patch("abc_sim.config.get_i2rt_sim_config", return_value=object()),
+            patch("abc_sim.env.MuJoCoYAMEnv", return_value=self.env) as construct,
+            patch.object(self.env, "close") as close,
+            self.assertRaisesRegex(ValueError, "control_decimation.*>= 17"),
+        ):
+            abc_sim.make_env(
+                self.evaluator.spec,
+                control_decimation=1,
+                render_cameras=False,
+                enable_task_randomizer=False,
+            )
+        self.assertEqual(construct.call_args.kwargs["control_decimation"], 1)
+        close.assert_called_once_with()
+
+    def test_factory_keeps_the_already_resolved_spelling_scene(self):
+        import abc_sim
+
+        created = SimpleNamespace(set_task=Mock())
+        with (
+            patch("abc_sim.config.get_i2rt_sim_config", return_value=object()),
+            patch("abc_sim.env.MuJoCoYAMEnv", return_value=created) as construct,
+            patch(
+                "abc_sim.task_registry.get_task_scene_xml",
+                side_effect=AssertionError("scene re-resolved"),
+            ),
+        ):
+            self.assertIs(
+                abc_sim.make_env(
+                    "spell_cat", render_cameras=False, enable_task_randomizer=False
+                ),
+                created,
+            )
+        self.assertEqual(
+            construct.call_args.kwargs["scene_xml"].name, "yam_blocks_scene.xml"
+        )
+        created.set_task.assert_called_once_with("spell_cat")
+
+    def test_supported_public_steps_return_scheduled_results_without_extra_ticks(self):
+        import numpy as np
+
+        for decimation in (17, 18, 34):
+            with self.subTest(decimation=decimation):
+                self.env._control_decimation = decimation
+                before_steps = self.evaluator._physics_steps
+                before_time = float(self.data.time)
+                with (
+                    patch.object(
+                        self.env, "get_obs", return_value={"state": np.zeros(14)}
+                    ),
+                ):
+                    transition = self.env.step(np.zeros(14))
+                    chunk = self.env.step_chunk(np.zeros((2, 14)))
+                self.assertEqual(len(transition), 5)
+                self.assertEqual(len(chunk), 6)
+                self.assertEqual(
+                    self.evaluator._physics_steps - before_steps, 3 * decimation
+                )
+                self.assertAlmostEqual(
+                    float(self.data.time) - before_time, 3 * decimation * 0.002
+                )
+                self.assertEqual(
+                    chunk[-1]["task_eval"]["verifier_sample_count"],
+                    self.evaluator._physics_steps // 17,
+                )
+
+    def test_explicit_action_ticks_reuse_control_mapping_without_scoring_or_rendering(
+        self,
+    ):
+        import numpy as np
+
+        action = np.arange(14, dtype=np.float32) / 14
+        expected = action.copy()
+        expected[[6, 13]] *= 0.0475
+        expected = expected[::-1]
+        with (
+            patch.object(self.env, "get_obs", side_effect=AssertionError("rendered")),
+            patch.object(
+                self.env, "_task_step_info", side_effect=AssertionError("scored")
+            ),
+            patch.object(
+                self.evaluator._tracker, "sample", wraps=self.evaluator._tracker.sample
+            ) as support,
+            patch.object(
+                self.evaluator,
+                "_score_model_data",
+                wraps=self.evaluator._score_model_data,
+            ) as scoring,
+        ):
+            self.env.apply_action(action.reshape(1, 14), physics_steps=16)
+            np.testing.assert_array_equal(self.data.ctrl, expected)
+            self.assertEqual(self.env.cur_step, 1)
+            self.assertEqual(support.call_count, 16)
+            self.assertEqual(scoring.call_count, 0)
+            self.assertAlmostEqual(float(self.data.time), 16 * 0.002)
+            with self.assertRaisesRegex(RuntimeError, "first scheduled"):
+                self.env.evaluate_task()
+            self.env.apply_action(action, physics_steps=1)
+            self.assertEqual(self.env.cur_step, 2)
+            self.assertEqual(support.call_count, 17)
+            self.assertEqual(scoring.call_count, 1)
+            self.assertAlmostEqual(float(self.data.time), 17 * 0.002)
+            self.assertEqual(
+                self.env.evaluate_task().metrics["verifier_sample_count"], 1
+            )
+
+    def test_explicit_action_rejects_bad_steps_and_shape_before_controls_or_physics(
+        self,
+    ):
+        import numpy as np
+
+        for steps in (0, -1, True, 1.5, "1"):
+            with (
+                self.subTest(steps=steps),
+                self.assertRaisesRegex(ValueError, "positive integer"),
+            ):
+                self.env.apply_action(np.ones(14), physics_steps=steps)
+        with self.assertRaisesRegex(ValueError, "one 14D"):
+            self.env.apply_action(np.ones(13), physics_steps=1)
+        np.testing.assert_array_equal(self.data.ctrl, np.zeros(14))
+        self.assertEqual(self.data.time, 0)
+        self.assertEqual(self.env.cur_step, 0)
+        self.assertEqual(self.evaluator._physics_steps, 0)
+
+    def test_exported_diagnostics_cannot_mutate_inventory_baseline_or_cached_scores(
+        self,
+    ):
+        for index, letter in enumerate("AB"):
+            address = self.model.joint(f"block_{letter}_jnt").qposadr[0]
+            self.data.qpos[address : address + 3] = [0, 0.1 - 0.04 * index, 0.012]
+            self.data.qpos[address + 3 : address + 7] = [2**-0.5, 0, 2**-0.5, 0]
+        self.env.advance_physics(510)
+        baseline = deepcopy(self.evaluator._initial_positions)
+        inventory = self.evaluator._letters.copy()
+        result = self.env.evaluate_task()
+        expected = deepcopy(result.to_info(squeeze=True))
+        info = result.to_info(squeeze=True)
+        frame = info["spelling_placement"]["frame"]
+        frame["letters"][0] = "invalid"
+        frame["initial_positions"][0][0] = 999
+        frame["positions"][0][0] = 999
+        info["spelling_placement"]["support"]["eligible"][0] = False
+        info["spelling_placement"]["score"]["reward"] = -1
+        result.reward[0] = -1
+        self.assertEqual(self.evaluator._initial_positions, baseline)
+        self.assertEqual(self.evaluator._letters, inventory)
+        self.assertEqual(self.env.evaluate_task().to_info(squeeze=True), expected)
+        self.env.advance_physics(17)
+        following = self.env.evaluate_task()
+        self.assertEqual(float(following.reward[0]), 1)
+        self.assertEqual(following.metrics["verifier_sample_count"], 31)
+        self.assertEqual(
+            following.metrics["spelling_placement"]["frame"]["initial_positions"],
+            baseline,
+        )
+        self.assertEqual(
+            following.metrics["spelling_placement"]["frame"]["letters"], inventory
+        )
 
     def test_reset_clears_support_and_requires_rebinding_even_on_reused_model(self):
         from abc_sim.randomization.core import RandomizationState
