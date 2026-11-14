@@ -39,19 +39,36 @@ def __getattr__(name: str):
             "TASK_RANDOMIZERS": TASK_RANDOMIZERS,
         }[name]
 
-    if name in {"SimTaskSpec", "get_task_spec", "list_task_specs", "maybe_get_task_spec"}:
+    if name in {
+        "SimTaskSpec",
+        "TaskSpecRegistry",
+        "get_task_spec",
+        "list_task_specs",
+        "list_task_variants",
+        "maybe_get_task_spec",
+        "register_task_spec",
+        "select_task_spec",
+    }:
         from abc_sim.task_specs import (
             SimTaskSpec,
+            TaskSpecRegistry,
             get_task_spec,
             list_task_specs,
+            list_task_variants,
             maybe_get_task_spec,
+            register_task_spec,
+            select_task_spec,
         )
 
         return {
             "SimTaskSpec": SimTaskSpec,
+            "TaskSpecRegistry": TaskSpecRegistry,
             "get_task_spec": get_task_spec,
             "list_task_specs": list_task_specs,
+            "list_task_variants": list_task_variants,
             "maybe_get_task_spec": maybe_get_task_spec,
+            "register_task_spec": register_task_spec,
+            "select_task_spec": select_task_spec,
         }[name]
 
     if name in {"TaskEvalResult", "TaskEvaluator", "make_task_evaluator"}:
@@ -367,9 +384,13 @@ __all__ = [
     "RandomizationState",
     "TASK_RANDOMIZERS",
     "SimTaskSpec",
+    "TaskSpecRegistry",
     "get_task_spec",
     "list_task_specs",
+    "list_task_variants",
     "maybe_get_task_spec",
+    "register_task_spec",
+    "select_task_spec",
     "TaskEvalResult",
     "TaskEvaluator",
     "make_task_evaluator",

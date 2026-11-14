@@ -15,7 +15,11 @@ import numpy as np
 
 from abc_sim.config import RobotSystemConfig
 from abc_sim.rendering.live import LiveRenderBackend, create_live_camera_provider
-from abc_sim.task_eval import TaskEvalResult, make_task_evaluator
+from abc_sim.task_eval import (
+    PhysicsObservedTaskEvaluator,
+    TaskEvalResult,
+    make_task_evaluator,
+)
 from abc_sim.task_registry import DEFAULT_SCENE_XML, SCENE_XMLS, get_task_randomizer, resolve_task
 from abc_sim.task_runtime import make_task_runtime
 from abc_sim.task_specs import SimTaskSpec, maybe_get_task_spec
@@ -115,6 +119,7 @@ class MuJoCoYAMEnv(gym.Env):
         self._task: str = ""  # set by make_env after construction
         self._task_spec: SimTaskSpec | None = None
         self._task_evaluator = None
+        self._physics_observer = None
         self._task_runtime = None
         self._arm_state_initialized = False
 
@@ -243,6 +248,7 @@ class MuJoCoYAMEnv(gym.Env):
         self._close_camera_backend()
         self.setup_model()
         self._task_evaluator = make_task_evaluator(self.model, self._task_spec)
+        self._physics_observer = None
 
     def reload_from_model(self, model: mujoco.MjModel) -> None:
         """Swap in a copy of an already-compiled MuJoCo model."""
@@ -250,6 +256,7 @@ class MuJoCoYAMEnv(gym.Env):
         self._close_camera_backend()
         self._bind_model(copy.deepcopy(model))
         self._task_evaluator = make_task_evaluator(self.model, self._task_spec)
+        self._physics_observer = None
 
     def _reset_camera_backend(self) -> None:
         if self._camera_provider is not None:
@@ -308,6 +315,13 @@ class MuJoCoYAMEnv(gym.Env):
         options: Optional[dict[str, Any]] = None,
         randomize: bool = True,
     ):
+        if (
+            self._task_spec is not None
+            and self._task_spec.version is not None
+            and not randomize
+        ):
+            raise ValueError("Versioned task variants require their seeded reset request.")
+        self._physics_observer = None
         super().reset(seed=seed)
         reset_arm_state = self._get_reset_arm_state()
         mujoco.mj_resetData(self.model, self.data)
@@ -321,7 +335,11 @@ class MuJoCoYAMEnv(gym.Env):
             randomization_request = None
             if options is not None:
                 randomization_request = options.get("randomization")
-            if randomization_request is None:
+            if self._task_spec is not None and self._task_spec.version is not None:
+                randomization_request = self._task_spec.resolve_reset_request(
+                    randomization_request
+                )
+            elif randomization_request is None:
                 # Task variants such as fixed-count aliases pin part of every reset.
                 randomization_request = getattr(self, "_task_reset_request", None)
             randomizer = getattr(self, "_task_randomizer", None)
@@ -373,8 +391,12 @@ class MuJoCoYAMEnv(gym.Env):
                 )
                 if active_joints is not None:
                     self._task_evaluator.set_active_object_joints(active_joints)
+            if isinstance(self._task_evaluator, PhysicsObservedTaskEvaluator):
+                self._task_evaluator.after_reset(self.model, self.data)
+                self._physics_observer = self._task_evaluator.after_physics_step
 
         self.cur_step = 0
+        self._task_start_time = float(self.data.time)
         info: dict[str, Any] = {}
         if self._last_randomization is not None:
             info["randomization"] = self._last_randomization
@@ -468,6 +490,11 @@ class MuJoCoYAMEnv(gym.Env):
             self.max_episode_steps is not None
             and self.cur_step >= self.max_episode_steps
         )
+        if self._task_spec is not None and self._task_spec.horizon_seconds is not None:
+            elapsed = float(self.data.time) - self._task_start_time
+            time_limit_reached |= elapsed >= self._task_spec.horizon_seconds
+            info["task_horizon_seconds"] = self._task_spec.horizon_seconds
+            info["task_simulated_seconds"] = elapsed
         truncated = bool(time_limit_reached and not terminated)
         info["episode_step"] = self.cur_step
         info["terminate_on_success"] = self.terminate_on_success
@@ -530,6 +557,16 @@ class MuJoCoYAMEnv(gym.Env):
         num_steps = self._control_decimation if steps is None else steps
         if num_steps < 0:
             raise ValueError(f"steps must be non-negative, got {num_steps}")
+        observer = self._physics_observer
+        if observer is None:
+            self._advance_native_physics(num_steps)
+        else:
+            for _ in range(num_steps):
+                self._advance_native_physics(1)
+                observer(self.model, self.data)
+
+    def _advance_native_physics(self, num_steps: int) -> None:
+        """Run the native loop without observer work for ordinary evaluators."""
         for _ in range(num_steps):
             if self._task_runtime is not None:
                 self._task_runtime.before_step(self.model, self.data)
@@ -570,6 +607,7 @@ class MuJoCoYAMEnv(gym.Env):
         self._task = resolved.env_task or task
         self._task_spec = resolved.task_spec or maybe_get_task_spec(task)
         self._task_evaluator = make_task_evaluator(self.model, self._task_spec)
+        self._physics_observer = None
         self._task_runtime = make_task_runtime(
             resolved.task_spec or self._task,
             self.model,

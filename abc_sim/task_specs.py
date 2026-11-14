@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import math
 from dataclasses import dataclass
 
 # Every task in this catalogue is assembled from the one bimanual scene family, so the
@@ -25,6 +26,31 @@ class SimTaskSpec:
     evaluator_name: str | None = None
     evaluator_options: tuple[tuple[str, object], ...] = ()
     reset_request: tuple[tuple[str, object], ...] = ()
+    version: str | None = None
+    base_task: str | None = None
+    horizon_seconds: float | None = None
+
+    def __post_init__(self) -> None:
+        if (self.version is None) != (self.base_task is None):
+            raise ValueError(
+                "A task variant requires both an explicit version and base task."
+            )
+        if self.version is not None:
+            if (
+                type(self.version) is not str
+                or not self.version
+                or type(self.base_task) is not str
+                or not self.base_task
+            ):
+                raise ValueError("Task versions and base task names must be nonempty.")
+            if (
+                type(self.horizon_seconds) not in (int, float)
+                or not math.isfinite(self.horizon_seconds)
+                or self.horizon_seconds <= 0
+            ):
+                raise ValueError("A versioned task requires a positive finite horizon.")
+        elif self.horizon_seconds is not None:
+            raise ValueError("An explicit horizon requires a versioned task identity.")
 
     def evaluator_kwargs(self) -> dict[str, object]:
         """Return evaluator options as a plain kwargs dict."""
@@ -35,6 +61,24 @@ class SimTaskSpec:
         """Return the randomization request every reset of this task applies, if any."""
 
         return dict(self.reset_request) or None
+
+    def resolve_reset_request(
+        self, override: dict[str, object] | None
+    ) -> dict[str, object] | None:
+        """Retain legacy overrides and require versioned variants' fixed fields."""
+        fixed = self.reset_request_options()
+        if self.version is None or override is None:
+            return fixed if override is None else override
+        if not isinstance(override, dict):
+            raise TypeError("A versioned task reset override must be a dictionary.")
+        for name, value in self.reset_request:
+            if name in override and (
+                type(override[name]) is not type(value) or override[name] != value
+            ):
+                raise ValueError(
+                    f"A reset cannot change versioned task field {name!r}."
+                )
+        return {**dict(self.reset_request), **override}
 
 
 def _normalize_key(value: str) -> str:
@@ -437,14 +481,85 @@ _TASK_SPECS: tuple[SimTaskSpec, ...] = (
 )
 
 
-_LOOKUP: dict[str, SimTaskSpec] = {}
-for _spec in _TASK_SPECS:
-    for _alias in {_spec.name, _spec.prompt, *_spec.aliases}:
-        _LOOKUP[_normalize_key(_alias)] = _spec
+class TaskSpecRegistry:
+    """Resolve definitions without allowing normalized keys to change owners.
+
+    A variant may retain its base task's prompt. That shared prompt continues
+    to resolve to the base task and must not also appear in the variant aliases.
+    Registration validates every key before publishing any of them.
+    """
+
+    def __init__(self, specs: tuple[SimTaskSpec, ...] = ()) -> None:
+        self._lookup: dict[str, SimTaskSpec] = {}
+        self._specs: dict[str, SimTaskSpec] = {}
+        for spec in specs:
+            self.register(spec)
+
+    def register(self, spec: SimTaskSpec) -> SimTaskSpec:
+        if not isinstance(spec, SimTaskSpec):
+            raise TypeError("Register a SimTaskSpec definition.")
+        explicit = (spec.name, *spec.aliases)
+        keys = {_normalize_key(value) for value in explicit}
+        prompt_key = _normalize_key(spec.prompt)
+        if not prompt_key or "" in keys:
+            raise ValueError("Task names, aliases and prompts must be nonempty.")
+        if spec.base_task is not None:
+            base = self.get(spec.base_task)
+            if base.name != spec.base_task:
+                raise ValueError("A variant must name its canonical base task.")
+            if prompt_key == _normalize_key(base.prompt):
+                if prompt_key in keys:
+                    raise ValueError(
+                        "A shared base prompt cannot be a variant name or alias."
+                    )
+            else:
+                keys.add(prompt_key)
+        else:
+            keys.add(prompt_key)
+        for key in keys:
+            existing = self._lookup.get(key)
+            if existing is not None and existing != spec:
+                raise ValueError(
+                    f"Task key {key!r} already belongs to {existing.name!r}."
+                )
+        for key in keys:
+            self._lookup[key] = spec
+        self._specs[spec.name] = spec
+        return spec
+
+    def get(self, name: str) -> SimTaskSpec:
+        return self._lookup[_normalize_key(name)]
+
+    def variants(self) -> tuple[SimTaskSpec, ...]:
+        return tuple(
+            spec for spec in self._specs.values() if spec.base_task is not None
+        )
+
+
+_REGISTRY = TaskSpecRegistry(_TASK_SPECS)
+_LOOKUP = _REGISTRY._lookup
+
+
+def register_task_spec(spec: SimTaskSpec) -> SimTaskSpec:
+    """Publish a collision-checked definition without changing the base catalogue."""
+    return _REGISTRY.register(spec)
+
+
+def list_task_variants() -> tuple[SimTaskSpec, ...]:
+    """Return explicitly registered variants separately from the base catalogue."""
+    return _REGISTRY.variants()
+
+
+def select_task_spec(name: str, *, version: str) -> SimTaskSpec:
+    """Select an exact canonical variant ID and require its declared version."""
+    spec = get_task_spec(name)
+    if name != spec.name or spec.version != version:
+        raise ValueError("Select a canonical task ID with its exact version.")
+    return spec
 
 
 def list_task_specs() -> tuple[SimTaskSpec, ...]:
-    """Return all known sim task specs."""
+    """Return the preserved base catalogue, excluding explicitly registered variants."""
 
     return _TASK_SPECS
 
@@ -456,7 +571,9 @@ def get_task_spec(name: str) -> SimTaskSpec:
     try:
         return _LOOKUP[key]
     except KeyError as exc:
-        available = ", ".join(spec.name for spec in _TASK_SPECS)
+        available = ", ".join(
+            spec.name for spec in (*_TASK_SPECS, *list_task_variants())
+        )
         raise KeyError(f"Unknown sim task '{name}'. Available: {available}") from exc
 
 
