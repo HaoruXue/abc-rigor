@@ -458,8 +458,9 @@ class MuJoCoYAMEnv(gym.Env):
         """Apply one policy action for an explicit positive integer physics count.
 
         Uses the native actuator mapping and task runtime/observer hooks.
-        Increments ``cur_step`` once, without rendering, scoring or checking
-        episode termination. The caller owns score readiness and horizons.
+        Increments ``cur_step`` once, without rendering, reading a score or
+        checking episode termination. Observer hooks still compute scheduled
+        results. The caller owns score readiness and horizons.
         """
         if type(physics_steps) is not int or physics_steps <= 0:
             raise ValueError("physics_steps must be a positive integer")
