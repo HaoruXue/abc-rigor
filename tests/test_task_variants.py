@@ -3,6 +3,7 @@
 import json
 import unittest
 from dataclasses import asdict, replace
+from unittest.mock import patch
 
 import abc_sim
 from abc_sim.task_specs import (
@@ -20,6 +21,16 @@ from abc_sim.task_variants import (
 
 
 class TaskVariantTests(unittest.TestCase):
+    def setUp(self):
+        registry = TaskSpecRegistry(list_task_specs())
+        isolation = patch.multiple(
+            "abc_sim.task_specs",
+            _REGISTRY=registry,
+            _LOOKUP=registry._lookup,
+        )
+        self.addCleanup(isolation.stop)
+        isolation.start()
+
     def test_public_registration_keeps_base_catalogue_and_shared_prompt(self):
         base = get_task_spec("put_plastic_bottles_in_bin")
         catalogue = list_task_specs()
