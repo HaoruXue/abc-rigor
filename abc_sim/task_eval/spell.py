@@ -5,6 +5,7 @@ from __future__ import annotations
 import mujoco
 import numpy as np
 
+from abc_sim.spelling_goal import SpellingGoal
 from abc_sim.task_eval.base import TaskEvalResult
 from abc_sim.task_eval.bottles import _quat_to_rotmat_batch
 from abc_sim.task_specs import SimTaskSpec
@@ -27,10 +28,9 @@ class SpellWordEvaluator:
 
     Distractor blocks are ignored.
 
-    The word arrives through the spec's evaluator options, so seven specs
-    share this class; all seven released words have distinct letters, and the
-    constructor rejects a word that repeats one rather than silently scoring
-    a block twice.
+    Fixed words arrive through the spec's evaluator options. Random sequence
+    tasks bind their exact goal from reset metadata. A repeated letter is
+    rejected because the scene contains one physical block per letter.
     """
 
     def __init__(
@@ -38,7 +38,8 @@ class SpellWordEvaluator:
         *,
         model: mujoco.MjModel,
         spec: SimTaskSpec,
-        word: str,
+        word: str | None = None,
+        sequence_length: int | None = None,
         table_geom_name: str = "table_plane",
         gap_min_m: float = 0.015,
         gap_max_m: float = 0.060,
@@ -47,29 +48,33 @@ class SpellWordEvaluator:
         upright_dot_min: float = 0.85,
     ) -> None:
         self.spec = spec
-        self.word = str(word).upper()
-        if not self.word.isalpha():
-            raise ValueError(f"word must be alphabetic, got {word!r}")
-        if len(set(self.word)) != len(self.word):
-            raise ValueError(
-                f"word {word!r} repeats a letter; one block per letter cannot spell it"
-            )
+        if (word is None) == (sequence_length is None):
+            raise ValueError("Specify either a fixed word or a random sequence length.")
+        self.sequence_length = sequence_length
+        self.word = "" if word is None else str(word).upper()
+        if sequence_length is not None:
+            if type(sequence_length) is not int or sequence_length not in (2, 3, 4):
+                raise ValueError("Spelling sequence length must be 2, 3, or 4.")
+        else:
+            if not self.word.isalpha():
+                raise ValueError(f"word must be alphabetic, got {word!r}")
+            if len(set(self.word)) != len(self.word):
+                raise ValueError(f"word {word!r} repeats a letter; one block per letter cannot spell it")
         self.gap_min_m = float(gap_min_m)
         self.gap_max_m = float(gap_max_m)
         self.row_dx_max_m = float(row_dx_max_m)
         self.z_tolerance_m = float(z_tolerance_m)
         self.upright_dot_min = float(upright_dot_min)
         self._table_geom_name = table_geom_name
-        self._bind_model(model)
+        self.model = model
+        if word is not None:
+            self._bind_model(model)
         self.reset(nworld=1)
 
     def _bind_model(self, model: mujoco.MjModel) -> None:
         self.model = model
         self._letter_addrs = np.asarray(
-            [
-                self._resolve_free_joint_qpos_adr(model, f"block_{letter}_jnt")
-                for letter in self.word
-            ],
+            [self._resolve_free_joint_qpos_adr(model, f"block_{letter}_jnt") for letter in self.word],
             dtype=np.int32,
         )
         self._rest_z = self._resolve_rest_heights(model)
@@ -77,14 +82,26 @@ class SpellWordEvaluator:
     def reset(self, *, nworld: int = 1) -> None:
         self._nworld = int(nworld)
         self._ever_success = np.zeros((self._nworld,), dtype=bool)
+        self._goal_configured = self.sequence_length is None
 
     def configure_from_randomization(
         self,
         model: mujoco.MjModel,
         randomization: object,
     ) -> None:
-        """Rebind to a model a scene reload swapped in under us."""
+        """Bind the exact reset goal even when the scene reuses its model."""
 
+        if self.sequence_length is not None:
+            goal = SpellingGoal.from_metadata(randomization.metadata)
+            if len(goal.sequence) != self.sequence_length:
+                raise ValueError("The realized spelling length differs from its task.")
+            self.word = goal.sequence
+            self._bind_model(model)
+            self.reset(nworld=self._nworld)
+            self._goal_configured = True
+            return
+        if "spelling_goal" in randomization.metadata:
+            raise ValueError("A fixed-word task cannot adopt a randomized spelling goal.")
         if model is not self.model:
             self._bind_model(model)
             self.reset(nworld=self._nworld)
@@ -104,18 +121,14 @@ class SpellWordEvaluator:
     def _resolve_rest_heights(self, model: mujoco.MjModel) -> np.ndarray:
         """Table plane z plus each word block's own collision half-height."""
 
-        geom_id = mujoco.mj_name2id(
-            model, mujoco.mjtObj.mjOBJ_GEOM, self._table_geom_name
-        )
+        geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, self._table_geom_name)
         if geom_id < 0:
             raise ValueError(f"Geom {self._table_geom_name!r} not found in model")
         table_z = float(model.geom_pos[geom_id][2])
 
         heights = []
         for letter in self.word:
-            body_id = mujoco.mj_name2id(
-                model, mujoco.mjtObj.mjOBJ_BODY, f"block_{letter}"
-            )
+            body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, f"block_{letter}")
             half = None
             for gid in range(model.ngeom):
                 if int(model.geom_bodyid[gid]) != body_id:
@@ -124,38 +137,27 @@ class SpellWordEvaluator:
                     half = float(model.geom_size[gid][2])
                     break
             if half is None:
-                raise ValueError(
-                    f"block_{letter} has no box collision geom to measure"
-                )
+                raise ValueError(f"block_{letter} has no box collision geom to measure")
             heights.append(table_z + half)
         return np.asarray(heights, dtype=np.float64)
 
     def evaluate_qpos_batch(self, qpos_batch: np.ndarray) -> TaskEvalResult:
+        if not self._goal_configured:
+            raise RuntimeError("Bind the realized spelling goal after every reset.")
         qpos_batch = np.asarray(qpos_batch, dtype=np.float32)
         if qpos_batch.ndim != 2 or qpos_batch.shape[1] != self.model.nq:
-            raise ValueError(
-                f"Expected qpos batch shape (B, {self.model.nq}), got {qpos_batch.shape}"
-            )
+            raise ValueError(f"Expected qpos batch shape (B, {self.model.nq}), got {qpos_batch.shape}")
         if qpos_batch.shape[0] != self._nworld:
-            self.reset(nworld=qpos_batch.shape[0])
+            self._nworld = qpos_batch.shape[0]
+            self._ever_success = np.zeros((self._nworld,), dtype=bool)
 
-        pos = np.stack(
-            [qpos_batch[:, adr : adr + 3] for adr in self._letter_addrs], axis=1
-        ).astype(np.float64)
-        quat = np.stack(
-            [qpos_batch[:, adr + 3 : adr + 7] for adr in self._letter_addrs], axis=1
-        )
+        pos = np.stack([qpos_batch[:, adr : adr + 3] for adr in self._letter_addrs], axis=1).astype(np.float64)
+        quat = np.stack([qpos_batch[:, adr + 3 : adr + 7] for adr in self._letter_addrs], axis=1)
 
         dy = np.diff(pos[..., 1], axis=1)
         dx = np.diff(pos[..., 0], axis=1)
-        pair_ok = (
-            (dy <= -self.gap_min_m)
-            & (dy >= -self.gap_max_m)
-            & (np.abs(dx) <= self.row_dx_max_m)
-        )
-        on_table = (
-            np.abs(pos[..., 2] - self._rest_z[None, :]) <= self.z_tolerance_m
-        )
+        pair_ok = (dy <= -self.gap_min_m) & (dy >= -self.gap_max_m) & (np.abs(dx) <= self.row_dx_max_m)
+        on_table = np.abs(pos[..., 2] - self._rest_z[None, :]) <= self.z_tolerance_m
         batch, count = quat.shape[:2]
         rot = _quat_to_rotmat_batch(quat.reshape(-1, 4))
         # The letter is printed on both x faces of the cube (a flipped block
@@ -171,16 +173,14 @@ class SpellWordEvaluator:
         self._ever_success |= success
 
         total = pair_ok.shape[1] + letter_ok.shape[1]
-        reward = (
-            (num_pairs_ok + num_letters_ok).astype(np.float32) / float(total)
-        ).clip(0.0, 1.0)
+        reward = ((num_pairs_ok + num_letters_ok).astype(np.float32) / float(total)).clip(0.0, 1.0)
         reward = np.where(success, 1.0, np.minimum(reward, 0.99)).astype(np.float32)
 
         return TaskEvalResult(
             reward=reward,
             success=success,
             metrics={
-                "word": self.word,
+                "word": [self.word] * qpos_batch.shape[0],
                 "num_pairs_in_row": num_pairs_ok,
                 "num_letters_resting_face_up": num_letters_ok,
                 "pair_dy_m": dy.astype(np.float32),

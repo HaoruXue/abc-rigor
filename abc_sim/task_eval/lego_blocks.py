@@ -163,6 +163,7 @@ class LegoBlocksSortingEvaluator:
         metrics.update(
             {
                 "num_correct": num_correct,
+                "active_object_count": total_blocks,
                 "num_wrong_bin": num_wrong_bin,
                 "ever_success": self._ever_success.copy(),
             }
