@@ -4,19 +4,24 @@ from __future__ import annotations
 
 import copy
 import os
-from pathlib import Path
 import string
-from typing import Any, Optional
+from pathlib import Path
+from typing import Any
 
 import gymnasium as gym
-from gymnasium import spaces
 import mujoco
 import numpy as np
+from gymnasium import spaces
 
 from abc_sim.config import RobotSystemConfig
 from abc_sim.rendering.live import LiveRenderBackend, create_live_camera_provider
 from abc_sim.task_eval import TaskEvalResult, make_task_evaluator
-from abc_sim.task_registry import DEFAULT_SCENE_XML, SCENE_XMLS, get_task_randomizer, resolve_task
+from abc_sim.task_registry import (
+    DEFAULT_SCENE_XML,
+    SCENE_XMLS,
+    get_task_randomizer,
+    resolve_task,
+)
 from abc_sim.task_runtime import make_task_runtime
 from abc_sim.task_specs import SimTaskSpec, maybe_get_task_spec
 
@@ -115,6 +120,9 @@ class MuJoCoYAMEnv(gym.Env):
         self._task: str = ""  # set by make_env after construction
         self._task_spec: SimTaskSpec | None = None
         self._task_evaluator = None
+        self._step_updates = False
+        self._step_update_interval = 1
+        self._step_task_eval: TaskEvalResult | None = None
         self._task_runtime = None
         self._arm_state_initialized = False
 
@@ -205,6 +213,7 @@ class MuJoCoYAMEnv(gym.Env):
 
     def _bind_model(self, model: mujoco.MjModel) -> None:
         self.model = model
+        self._step_task_eval = None
         self.model.opt.timestep = self._physics_dt
         self.data = mujoco.MjData(self.model)
         self._arm_state_initialized = False
@@ -242,14 +251,27 @@ class MuJoCoYAMEnv(gym.Env):
         self._scene_xml_string = xml_string
         self._close_camera_backend()
         self.setup_model()
-        self._task_evaluator = make_task_evaluator(self.model, self._task_spec)
+        self._bind_task_evaluator()
 
     def reload_from_model(self, model: mujoco.MjModel) -> None:
         """Swap in a copy of an already-compiled MuJoCo model."""
         self._scene_xml_string = None
         self._close_camera_backend()
         self._bind_model(copy.deepcopy(model))
+        self._bind_task_evaluator()
+
+    def _bind_task_evaluator(self) -> None:
+        """Cache the evaluator's update requirements when its model/task changes."""
         self._task_evaluator = make_task_evaluator(self.model, self._task_spec)
+        self._step_updates = bool(
+            getattr(self._task_evaluator, "requires_step_updates", False)
+        )
+        self._step_update_interval = (
+            self._control_decimation
+            if getattr(self._task_evaluator, "evaluate_at_control_rate", False)
+            else 1
+        )
+        self._step_task_eval = None
 
     def _reset_camera_backend(self) -> None:
         if self._camera_provider is not None:
@@ -304,8 +326,8 @@ class MuJoCoYAMEnv(gym.Env):
     def reset(
         self,
         *,
-        seed: Optional[int] = None,
-        options: Optional[dict[str, Any]] = None,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
         randomize: bool = True,
     ):
         super().reset(seed=seed)
@@ -347,9 +369,9 @@ class MuJoCoYAMEnv(gym.Env):
                 self.data,
                 randomization=self._last_randomization,
             )
-            self._sync_prompt_from_task_runtime()
 
         self._reset_camera_backend()
+        self._step_task_eval = None
         if self._task_evaluator is not None:
             self._task_evaluator.reset(nworld=1)
             if self._last_randomization is not None and hasattr(
@@ -376,6 +398,9 @@ class MuJoCoYAMEnv(gym.Env):
                 )
                 if active_joints is not None:
                     self._task_evaluator.set_active_object_joints(active_joints)
+            if self._step_updates:
+                self._update_step_task_eval()
+        self._sync_prompt_from_task_runtime()
 
         self.cur_step = 0
         info: dict[str, Any] = {}
@@ -455,7 +480,9 @@ class MuJoCoYAMEnv(gym.Env):
         return action.reshape(self.chunk_dim, self.single_timestep_action_dim)
 
     def _task_step_info(self) -> tuple[float, dict[str, Any]]:
-        task_eval = self.evaluate_task()
+        task_eval = self._step_task_eval
+        if task_eval is None:
+            task_eval = self.evaluate_task()
         reward = task_eval.scalar_reward() if task_eval is not None else 0.0
         info: dict[str, Any] = {}
         if task_eval is not None:
@@ -533,15 +560,31 @@ class MuJoCoYAMEnv(gym.Env):
         num_steps = self._control_decimation if steps is None else steps
         if num_steps < 0:
             raise ValueError(f"steps must be non-negative, got {num_steps}")
-        for _ in range(num_steps):
+        for step in range(num_steps):
             if self._task_runtime is not None:
                 self._task_runtime.before_step(self.model, self.data)
             mujoco.mj_step(self.model, self.data)
+            if self._step_updates and (
+                (step + 1) % self._step_update_interval == 0
+                or step == num_steps - 1
+            ):
+                # Refresh only when scoring needs the integrated positions/contacts.
+                # Always score the final state, including a partial control step.
+                mujoco.mj_fwdPosition(self.model, self.data)
+                self._update_step_task_eval()
             if self._task_runtime is not None:
                 after_step = getattr(self._task_runtime, "after_step", None)
                 if after_step is not None:
                     after_step(self.model, self.data)
                 self._sync_prompt_from_task_runtime()
+
+    def _update_step_task_eval(self) -> None:
+        """Share the latest task score with runtime controls and env rewards."""
+        self._step_task_eval = self.evaluate_task()
+        if self._task_runtime is not None and self._step_task_eval is not None:
+            on_task_evaluation = getattr(self._task_runtime, "on_task_evaluation", None)
+            if on_task_evaluation is not None:
+                on_task_evaluation(self._step_task_eval)
 
     def _sync_prompt_from_task_runtime(self) -> None:
         """Adopt a runtime-owned prompt when the task exposes one."""
@@ -572,7 +615,7 @@ class MuJoCoYAMEnv(gym.Env):
         self._task_request = task
         self._task = resolved.env_task or task
         self._task_spec = resolved.task_spec or maybe_get_task_spec(task)
-        self._task_evaluator = make_task_evaluator(self.model, self._task_spec)
+        self._bind_task_evaluator()
         self._task_runtime = make_task_runtime(
             resolved.task_spec or self._task,
             self.model,
@@ -593,6 +636,10 @@ class MuJoCoYAMEnv(gym.Env):
             return None
         evaluate_model_data = getattr(self._task_evaluator, "evaluate_model_data", None)
         if evaluate_model_data is not None:
+            if not self._step_updates:
+                # Contact-based tasks still need current state when explicitly
+                # scored, without refreshing after every physics integration.
+                mujoco.mj_fwdPosition(self.model, self.data)
             return evaluate_model_data(self.model, self.data)
         qpos_batch = np.asarray(self.data.qpos, dtype=np.float32)[None, :]
         return self._task_evaluator.evaluate_qpos_batch(qpos_batch)
