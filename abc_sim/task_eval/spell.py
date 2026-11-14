@@ -180,7 +180,7 @@ class SpellWordEvaluator:
             reward=reward,
             success=success,
             metrics={
-                "word": self.word,
+                "word": [self.word] * qpos_batch.shape[0],
                 "num_pairs_in_row": num_pairs_ok,
                 "num_letters_resting_face_up": num_letters_ok,
                 "pair_dy_m": dy.astype(np.float32),

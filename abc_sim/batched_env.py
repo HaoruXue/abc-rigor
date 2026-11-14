@@ -36,16 +36,20 @@ class PerWorldEvaluators:
 
     def __init__(self, model: mujoco.MjModel, spec: Any, num_worlds: int):
         self.evaluators = [make_task_evaluator(model, spec) for _ in range(num_worlds)]
+        self._metric_probe = make_task_evaluator(model, spec)
 
     def reset(self, model: mujoco.MjModel, randomizations: list[Any]) -> None:
         for evaluator, state in zip(self.evaluators, randomizations):
             evaluator.reset(nworld=1)
             if state is not None:
                 evaluator.configure_from_randomization(model, state)
+        self._metric_probe.reset(nworld=1)
+        if randomizations[0] is not None:
+            self._metric_probe.configure_from_randomization(model, randomizations[0])
 
     def per_world_keys(self, qpos: np.ndarray) -> set[str]:
-        metrics = self.evaluators[0].evaluate_qpos_batch(qpos[:1]).metrics
-        self.evaluators[0].reset(nworld=1)
+        """Discover metric axes using a separate configured episode evaluator."""
+        metrics = self._metric_probe.evaluate_qpos_batch(qpos[:1]).metrics
         return {key for key, value in metrics.items() if isinstance(value, (list, np.ndarray)) and len(value) == 1}
 
     def evaluate_qpos_batch(self, qpos: np.ndarray) -> TaskEvalResult:

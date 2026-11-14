@@ -19,11 +19,15 @@ from ..core import (
     ScalePerturbRange,
     SceneRandomizer,
 )
-from ..requests import LegoBlocksResetRequest, NutsBoltsResetRequest, SortingResetRequest
+from ..requests import (
+    LegoBlocksResetRequest,
+    NutsBoltsResetRequest,
+    SortingResetRequest,
+    _LEGO_MAX_BLOCKS_PER_COLOR,
+    _NUTS_BOLTS_MAX_OBJECTS_PER_TYPE,
+)
 from .count_box import _count_box_apply_scene_transforms
 
-_NUTS_BOLTS_MAX_OBJECTS_PER_TYPE = 20
-_LEGO_MAX_BLOCKS_PER_COLOR = 9
 _NUTS_BOLTS_OBJECT_COUNT_RANGE = (8, _NUTS_BOLTS_MAX_OBJECTS_PER_TYPE)
 _LEGO_BLOCKS_PER_COLOR_COUNT_RANGE = (3, _LEGO_MAX_BLOCKS_PER_COLOR)
 _NUTS_BOLTS_BIN_BODY_NAMES = ("nuts_sorting_bin", "bolts_sorting_bin")

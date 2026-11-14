@@ -6,13 +6,21 @@ import unittest
 from copy import deepcopy
 from unittest.mock import patch
 
-import mujoco
 import numpy as np
-from abc_sim.randomization.core import RandomizationState, SceneRandomizer
-from abc_sim.randomization.tasks.blocks import BlocksRandomizer
 from abc_sim.spelling_goal import SpellingGoal
-from abc_sim.task_eval.spell import SpellWordEvaluator
 from abc_sim.task_specs import get_task_spec
+
+try:
+    import mujoco
+except ModuleNotFoundError as exc:
+    if exc.name != "mujoco":
+        raise
+    mujoco = None
+
+if mujoco is not None:
+    from abc_sim.randomization.core import RandomizationState, SceneRandomizer
+    from abc_sim.randomization.tasks.blocks import BlocksRandomizer
+    from abc_sim.task_eval.spell import SpellWordEvaluator
 
 
 def block_model():
@@ -105,6 +113,7 @@ class SpellingGoalTest(unittest.TestCase):
             self.assertIsNone(spec.reset_request_options())
 
 
+@unittest.skipIf(mujoco is None, "MuJoCo is required for native randomization.")
 class BlocksGoalRandomizationTest(unittest.TestCase):
     def test_goal_stream_does_not_change_the_requested_pose_seed(self):
         state = RandomizationState(976, {"example": {"pos": [1, 2, 3]}})
@@ -134,6 +143,7 @@ class BlocksGoalRandomizationTest(unittest.TestCase):
                     base.assert_not_called()
 
 
+@unittest.skipIf(mujoco is None, "MuJoCo is required for native spelling evaluation.")
 class SpellingEvaluatorGoalTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

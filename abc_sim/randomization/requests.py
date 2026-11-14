@@ -5,6 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass, fields as _fields
 from typing import Any
 
+_NUTS_BOLTS_MAX_OBJECTS_PER_TYPE = 20
+_LEGO_MAX_BLOCKS_PER_COLOR = 9
+
 
 @dataclass(frozen=True)
 class DishRackResetRequest:
@@ -320,8 +323,12 @@ class NutsBoltsResetRequest(SortingResetRequest):
         super().__post_init__()
         for name in ("nut_count", "bolt_count"):
             value = getattr(self, name)
-            if value is not None and (type(value) is not int or not 1 <= value <= 20):
-                raise ValueError(f"{name} must be an integer between 1 and 20.")
+            if value is not None and (
+                type(value) is not int or not 1 <= value <= _NUTS_BOLTS_MAX_OBJECTS_PER_TYPE
+            ):
+                raise ValueError(
+                    f"{name} must be an integer between 1 and {_NUTS_BOLTS_MAX_OBJECTS_PER_TYPE}."
+                )
 
 
 @dataclass(frozen=True)
@@ -333,8 +340,12 @@ class LegoBlocksResetRequest(SortingResetRequest):
     def __post_init__(self) -> None:
         super().__post_init__()
         value = self.blocks_per_color
-        if value is not None and (type(value) is not int or not 1 <= value <= 9):
-            raise ValueError("blocks_per_color must be an integer between 1 and 9.")
+        if value is not None and (
+            type(value) is not int or not 1 <= value <= _LEGO_MAX_BLOCKS_PER_COLOR
+        ):
+            raise ValueError(
+                f"blocks_per_color must be an integer between 1 and {_LEGO_MAX_BLOCKS_PER_COLOR}."
+            )
 
 
 class _SweepPlacementFailure(RuntimeError):
