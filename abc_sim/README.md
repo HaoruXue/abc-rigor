@@ -150,6 +150,10 @@ randomization = info["randomization"]
 eval sets. Passing `randomize=False` resets the scene without sampling a new
 world.
 
+Custom `SimTaskSpec` objects can also be passed directly to `make_env`. See
+[optional seeded spelling goals](../docs/seeded-spelling.md) for a configuration
+that samples two, three, or four distinct letters without adding catalogue tasks.
+
 ## Rewards and Success
 
 Task evaluators live under `abc_sim/task_eval/`. If a task has an evaluator,

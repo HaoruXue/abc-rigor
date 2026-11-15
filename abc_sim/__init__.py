@@ -9,6 +9,7 @@ __version__ = "0.1.0"
 
 if TYPE_CHECKING:
     from abc_sim.env import MuJoCoYAMEnv
+    from abc_sim.task_specs import SimTaskSpec
 
 
 def __getattr__(name: str):
@@ -123,7 +124,7 @@ def __getattr__(name: str):
 
 
 def make_env(
-    task: str = "bottles",
+    task: str | SimTaskSpec = "bottles",
     render_cameras: bool = True,
     camera_backend: str = "mujoco",
     camera_gpu_id: int | None = None,
@@ -141,7 +142,7 @@ def make_env(
     """Create a MuJoCo YAM bimanual environment.
 
     Args:
-        task: Task scene — "bottles" (default), "inhand_transfer", etc.
+        task: Task scene, catalogue name, or a custom ``SimTaskSpec``.
         render_cameras: Whether to render camera images in observations.
         prompt: Task prompt string included in observations. Defaults to the
             resolved task prompt when available.

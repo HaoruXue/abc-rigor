@@ -608,7 +608,7 @@ class MuJoCoYAMEnv(gym.Env):
         """Return the current 14D policy-space state from MuJoCo qpos."""
         return self.project_state_from_qpos(self.data.qpos)
 
-    def set_task(self, task: str) -> None:
+    def set_task(self, task: str | SimTaskSpec) -> None:
         """Configure the task name and attach any registered evaluator."""
 
         resolved = resolve_task(task)
