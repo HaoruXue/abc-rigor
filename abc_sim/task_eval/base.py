@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 
@@ -84,3 +84,19 @@ class TaskEvaluator(Protocol):
 
     def evaluate_qpos_batch(self, qpos_batch: np.ndarray) -> TaskEvalResult:
         """Evaluate reward/success for a qpos batch of shape ``(B, nq)``."""
+
+
+@runtime_checkable
+class PhysicsObservedTaskEvaluator(TaskEvaluator, Protocol):
+    """Opt-in single-world evaluation using every solved native physics step."""
+
+    evaluation_interval_steps: int
+
+    def after_reset(self, model: Any, data: Any) -> None:
+        """Capture the episode baseline after randomization and settling."""
+
+    def after_physics_step(self, model: Any, data: Any) -> None:
+        """Observe solved contacts once per native physics tick."""
+
+    def evaluate_model_data(self, model: Any, data: Any) -> TaskEvalResult:
+        """Read the latest scheduled result without advancing observations."""

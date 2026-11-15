@@ -15,7 +15,11 @@ from gymnasium import spaces
 
 from abc_sim.config import RobotSystemConfig
 from abc_sim.rendering.live import LiveRenderBackend, create_live_camera_provider
-from abc_sim.task_eval import TaskEvalResult, make_task_evaluator
+from abc_sim.task_eval import (
+    PhysicsObservedTaskEvaluator,
+    TaskEvalResult,
+    make_task_evaluator,
+)
 from abc_sim.task_registry import (
     DEFAULT_SCENE_XML,
     SCENE_XMLS,
@@ -124,6 +128,8 @@ class MuJoCoYAMEnv(gym.Env):
         self._step_updates = False
         self._step_update_interval = 1
         self._step_task_eval: TaskEvalResult | None = None
+        self._physics_evaluator: PhysicsObservedTaskEvaluator | None = None
+        self._physics_observer = None
         self._task_runtime = None
         self._arm_state_initialized = False
 
@@ -264,6 +270,12 @@ class MuJoCoYAMEnv(gym.Env):
     def _bind_task_evaluator(self) -> None:
         """Cache the evaluator's update requirements when its model/task changes."""
         self._task_evaluator = make_task_evaluator(self.model, self._task_spec)
+        self._physics_evaluator = (
+            self._task_evaluator
+            if isinstance(self._task_evaluator, PhysicsObservedTaskEvaluator)
+            else None
+        )
+        self._physics_observer = None
         self._step_updates = bool(
             getattr(self._task_evaluator, "requires_step_updates", False)
         )
@@ -331,6 +343,8 @@ class MuJoCoYAMEnv(gym.Env):
         options: dict[str, Any] | None = None,
         randomize: bool = True,
     ):
+        self._validate_physics_observation_cadence()
+        self._physics_observer = None
         super().reset(seed=seed)
         # Each reset starts the arms at init_q; pass options={"keep_arm_state": True} to carry the current pose.
         if not (options or {}).get("keep_arm_state", False):
@@ -401,6 +415,9 @@ class MuJoCoYAMEnv(gym.Env):
                     self._task_evaluator.set_active_object_joints(active_joints)
             if self._step_updates:
                 self._update_step_task_eval()
+            if self._physics_evaluator is not None:
+                self._physics_evaluator.after_reset(self.model, self.data)
+                self._physics_observer = self._physics_evaluator.after_physics_step
         self._sync_prompt_from_task_runtime()
 
         self.cur_step = 0
@@ -417,6 +434,7 @@ class MuJoCoYAMEnv(gym.Env):
         state is advanced.
         """
 
+        self._validate_physics_observation_cadence()
         obs = self._apply_single_action(action, render_obs=render_obs)
         reward, info = self._task_step_info()
         terminated, truncated = self._episode_status(info)
@@ -460,6 +478,28 @@ class MuJoCoYAMEnv(gym.Env):
         if not render_obs:
             return None
         return self.get_obs()
+
+    def apply_action(self, action: np.ndarray, *, physics_steps: int) -> None:
+        """Apply one policy action for an explicit positive physics-step count.
+
+        Native actuator mapping, task runtime callbacks and physics observers
+        run normally. This increments ``cur_step`` once without rendering or
+        returning reward/termination; the caller owns when to read those.
+        """
+        if type(physics_steps) is not int or physics_steps <= 0:
+            raise ValueError("physics_steps must be a positive integer")
+        self._step_single(self._as_single_action(action), physics_steps=physics_steps)
+        self.cur_step += 1
+
+    def _validate_physics_observation_cadence(self) -> None:
+        if self._physics_evaluator is not None:
+            minimum = self._physics_evaluator.evaluation_interval_steps
+            if type(self._control_decimation) is not int or self._control_decimation < minimum:
+                raise ValueError(
+                    f"control_decimation must be an integer >= {minimum} for "
+                    f"{self._task_spec.name!r}; use apply_action or advance_physics "
+                    "for shorter low-level steps."
+                )
 
     def _as_single_action(self, action_14d: np.ndarray) -> np.ndarray:
         action = np.asarray(action_14d, dtype=np.float32)
@@ -543,7 +583,7 @@ class MuJoCoYAMEnv(gym.Env):
             )
         return self.get_init_q().astype(np.float32, copy=True)
 
-    def _step_single(self, action_14d: np.ndarray):
+    def _step_single(self, action_14d: np.ndarray, *, physics_steps: int | None = None):
         """Apply a single 14D action and step physics."""
         ctrl = np.zeros(self.model.nu)
         for i in range(self.single_timestep_action_dim):
@@ -553,7 +593,7 @@ class MuJoCoYAMEnv(gym.Env):
                 val = val * _GRIPPER_CTRL_MAX
             ctrl[self._ctrl_indices[i]] = val
         self.data.ctrl[:] = ctrl
-        self.advance_physics()
+        self.advance_physics(physics_steps)
 
     def advance_physics(self, steps: int | None = None) -> None:
         """Advance MuJoCo physics while applying any task runtime controls."""
@@ -561,10 +601,13 @@ class MuJoCoYAMEnv(gym.Env):
         num_steps = self._control_decimation if steps is None else steps
         if num_steps < 0:
             raise ValueError(f"steps must be non-negative, got {num_steps}")
+        observer = self._physics_observer
         for step in range(num_steps):
             if self._task_runtime is not None:
                 self._task_runtime.before_step(self.model, self.data)
             mujoco.mj_step(self.model, self.data)
+            if observer is not None:
+                observer(self.model, self.data)
             if self._step_updates and (
                 (step + 1) % self._step_update_interval == 0
                 or step == num_steps - 1
@@ -650,6 +693,8 @@ class MuJoCoYAMEnv(gym.Env):
 
         if self._task_evaluator is None:
             return None
+        if self._physics_evaluator is not None:
+            return self._physics_evaluator.evaluate_model_data(self.model, self.data)
         evaluate_model_data = getattr(self._task_evaluator, "evaluate_model_data", None)
         if evaluate_model_data is not None:
             if not self._step_updates:

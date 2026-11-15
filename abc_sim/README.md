@@ -156,6 +156,9 @@ that samples two, three, or four distinct letters without adding catalogue tasks
 
 ## Rewards and Success
 
+Custom tasks can opt into [conservative free-placement spelling](../docs/free-placement-spelling.md),
+which uses native contacts and credits only unambiguous letter positions.
+
 Task evaluators live under `abc_sim/task_eval/`. If a task has an evaluator,
 `env.step(...)` and `env.step_chunk(...)` return task metrics in `info`:
 
