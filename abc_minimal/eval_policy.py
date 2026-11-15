@@ -26,6 +26,7 @@ from abc_minimal.policy import (
     VLAInferencePolicy,
 )
 from abc_minimal.policy import DiTInferencePolicy as SimPolicy
+from abc_minimal.termination import rollout_over
 from abc_sim.randomization.core import RandomizationSamplingError
 from deploy.policy.selector import sniff_policy_kind
 
@@ -220,18 +221,6 @@ def resolve_prefix_length(
     if errors:
         raise ValueError("Invalid prefix config:\n  - " + "\n  - ".join(errors))
     return length
-
-
-def rollout_over(task_eval: dict[str, Any]) -> bool:
-    """Whether a rollout has nothing left to do and can stop before its budget.
-
-    Completion tasks, including timed ball-tray hold-and-lower, stop on
-    ``ever_success``. Legacy maintenance evaluators can instead expose an
-    ``ever_failed`` terminal signal.
-    """
-    if "ever_failed" in task_eval:
-        return bool(task_eval["ever_failed"])
-    return bool(task_eval["ever_success"])
 
 
 def progress_text(task_eval: dict[str, Any], bottles_key: str) -> str:
