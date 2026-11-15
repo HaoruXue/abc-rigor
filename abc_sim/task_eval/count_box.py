@@ -234,6 +234,7 @@ class CountIntoOpaqueBoxEvaluator:
                 success=np.zeros((batch,), dtype=bool),
                 metrics={
                     "goal_configured": False,
+                    "termination_mode": "maintenance",
                     "ever_failed": np.zeros((batch,), dtype=bool),
                     "ever_success": np.zeros((batch,), dtype=bool),
                 },
@@ -284,6 +285,7 @@ class CountIntoOpaqueBoxEvaluator:
                 "objects_in_box": in_box,
                 # Final-state semantics: never stop a rollout early on a count
                 # that may still change, and let the last frame decide.
+                "termination_mode": "maintenance",
                 "ever_failed": np.zeros((batch,), dtype=bool),
                 "ever_success": success.copy(),
                 "ever_correct": self._ever_correct.copy(),

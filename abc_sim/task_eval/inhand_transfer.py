@@ -28,13 +28,11 @@ class InhandTransferOtherSideEvaluator:
         object_joint_name: str = "task_object_joint",
         table_geom_name: str = "table_plane",
         other_side_min_y_m: float = 0.10,
-        max_resting_height_m: float = 0.10,
     ) -> None:
         self.spec = spec
         self._object_joint_name = object_joint_name
         self._table_geom_name = table_geom_name
         self.other_side_min_y_m = float(other_side_min_y_m)
-        self.max_resting_height_m = float(max_resting_height_m)
         self._start_sign: float | None = None
         self._spawn_y: float | None = None
         self._bind_model(model)
@@ -64,6 +62,7 @@ class InhandTransferOtherSideEvaluator:
             )
         }
         self._gripper_geom_ids = gripper_geom_ids(model)
+        self._contact_data = mujoco.MjData(model)
 
     def reset(self, *, nworld: int = 1) -> None:
         self._nworld = int(nworld)
@@ -157,11 +156,11 @@ class InhandTransferOtherSideEvaluator:
             )
         if qpos_batch.shape[0] != self._nworld:
             self.reset(nworld=qpos_batch.shape[0])
-        data = mujoco.MjData(self.model)
+        data = self._contact_data
         table_contacts, gripper_contacts = [], []
         for qpos in qpos_batch:
             data.qpos[:] = qpos
-            mujoco.mj_forward(self.model, data)
+            mujoco.mj_fwdPosition(self.model, data)
             table_contacts.append(
                 has_contact(data, self._object_geom_ids, self._table_geom_ids)
             )

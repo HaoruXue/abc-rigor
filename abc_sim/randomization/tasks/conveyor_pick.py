@@ -72,19 +72,6 @@ def _conveyor_belt_speed_range(request: Any | None) -> tuple[float, float]:
             f"conveyor_pick belt speed bounds must satisfy {lowest} <= min <= max <= {highest} m/s, got {low}, {high}"
         )
     return low, high
-    if not isinstance(request, dict):
-        raise TypeError(f"conveyor_pick reset request must be a dict, got {type(request).__name__}")
-    unknown = set(request) - {"belt_speed_min_m_s", "belt_speed_max_m_s"}
-    if unknown:
-        raise ValueError(f"conveyor_pick reset request has unknown keys: {sorted(unknown)}")
-    low = float(request.get("belt_speed_min_m_s", low))
-    high = float(request.get("belt_speed_max_m_s", high))
-    lowest, highest = _CONVEYOR_BELT_SPEED_LIMITS_M_S
-    if not lowest <= low <= high <= highest:
-        raise ValueError(
-            f"conveyor_pick belt speed bounds must satisfy {lowest} <= min <= max <= {highest} m/s, got {low}, {high}"
-        )
-    return low, high
 
 
 def _conveyor_pick_collision_bottom_z(variant_dir: _Path) -> float:
