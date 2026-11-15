@@ -145,8 +145,8 @@ class NativeSpellingTests(unittest.TestCase):
         self.env.reset(seed=37)
         self.model, self.data = self.env.model, self.env.data
 
-    def place_word(self):
-        for index, letter in enumerate("AB"):
+    def place_word(self, word="AB"):
+        for index, letter in enumerate(word):
             address = self.model.joint(f"block_{letter}_jnt").qposadr[0]
             self.data.qpos[address : address + 3] = [0, 0.1 - 0.04 * index, 0.012]
             self.data.qpos[address + 3 : address + 7] = [2**-0.5, 0, 2**-0.5, 0]
@@ -225,12 +225,31 @@ class NativeSpellingTests(unittest.TestCase):
         self.assertEqual(self.env.evaluate_task().metrics["verifier_sample_count"], 1)
 
     def test_qpos_only_and_batched_replay_reject_only_the_contact_observer(self):
+        contact_spec = self.env._task_spec
         with self.assertRaisesRegex(NotImplementedError, "solved contacts"):
             self.env._task_evaluator.evaluate_qpos_batch(self.data.qpos[None])
         with self.assertRaisesRegex(NotImplementedError, "solved contacts"):
             BatchedWarpYAMEnv(self.env, num_worlds=1, camera_height=8, camera_width=8)
+        self.env._task_randomizer = None
         self.env.set_task("spell_cat")
+        observation, info = self.env.reset(seed=31)
+        self.assertEqual(observation["prompt"], "spell cat")
+        self.assertNotIn("spelling_goal", info["randomization"].metadata)
+        self.place_word("CAT")
+        result = self.env.evaluate_task()
+        self.assertTrue(result.scalar_success())
+        self.assertEqual(result.metrics["word"], "CAT")
         BatchedWarpYAMEnv(self.env, num_worlds=1, camera_height=8, camera_width=8)
+        self.env.set_task(contact_spec)
+        observation, info = self.env.reset(seed=32)
+        goal = SpellingGoal.from_metadata(info["randomization"].metadata)
+        self.assertEqual(observation["prompt"], goal.prompt)
+        with self.assertRaisesRegex(RuntimeError, "first scheduled"):
+            self.env.evaluate_task()
+        self.env.advance_physics(17)
+        result = self.env.evaluate_task()
+        self.assertEqual(result.metrics["word"], goal.sequence)
+        self.assertEqual(result.metrics["verifier_sample_count"], 1)
 
 
 if __name__ == "__main__":
