@@ -206,6 +206,7 @@ class NutsBoltsSortingEvaluator:
                 "num_nuts_sorted": num_nuts_sorted,
                 "num_bolts_sorted": num_bolts_sorted,
                 "num_correct": num_correct,
+                "active_object_count": total_parts,
                 "num_correct_spec": num_correct_spec,
                 "num_correct_inverted": num_correct_inverted,
                 "sorted_orientation": orientation.tolist(),
