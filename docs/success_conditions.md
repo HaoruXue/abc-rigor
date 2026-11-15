@@ -27,8 +27,10 @@
   Format whole seconds without `.0`. Keep the tray at least 5 cm
   above its initial height and the ball within the existing tray-local region
   for that duration without interruption. An invalid sample restarts the hold.
-  Once the hold completes, ignore the ball and require a new tray–table contact
-  at a later timestamp. Existing contact or repeated evaluation of the same
+  Once the hold completes, require a new tray–table contact at a later timestamp.
+  Losing the ball before placement ends the attempt with reward 0 by default;
+  `require_ball_on_tray_when_lowered=False` disables that check.
+  Existing contact or repeated evaluation of the same
   timestamp does not count as lowering. Completion is latched.
   The environment owns the evaluator and shares its initial and control-step
   results with the runtime and step rewards. Ball-tray scoring refreshes
@@ -55,9 +57,10 @@
   together; positions, mesh files and physical geometry are unchanged.
   Chess appearance therefore differs from simulation data rendered before
   this PR's color swap.
-- **Relative placement:** allow zero separation along the requested direction.
-  Keep the 30 cm upper limit, 8 cm perpendicular limit, and existing placement
-  height check.
+- **Relative placement:** the mover's center must pass the reference's current
+  collision-geometry edge in the requested direction. Keep the 30 cm upper limit,
+  8 cm perpendicular limit, 45-degree directional cone, and placement-height check.
+  `require_past_reference_edge=False` restores the center-based condition.
 - **In-hand transfer:** require object–table contact and no object–gripper
   contact in place of the height limit. Keep the table footprint and opposite
   side requirements. Reset metadata remains the normal source of the start side.

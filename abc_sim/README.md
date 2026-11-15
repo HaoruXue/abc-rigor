@@ -481,8 +481,8 @@ Two reading notes when comparing against those numbers:
   `mean_reward` but not from `mean_max_progress`). `success_rate` is stricter
   than both: every object placed simultaneously, at any instant. For the
   current ball-tray task, reward increases with uninterrupted hold progress
-  up to 0.9, stays at 0.9 until a new table contact, then reaches 1.0 on latched
-  success. Its published historical maintenance results used different reward
+  up to 0.9 and decays after 15 seconds. Successful placement scores 0.8–1.0
+  depending on hold duration. Its published historical maintenance results used different reward
   semantics and should be read under that earlier criterion.
 - Training remaps some sim task names before they become prompts, so two
   catalogue tasks read best under a prompt that differs from their spec
