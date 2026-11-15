@@ -32,10 +32,72 @@ def _quat_to_rotmat_batch(quat_batch: np.ndarray) -> np.ndarray:
     ).astype(np.float32)
 
 
+_TOOL_HANDLES = ("brush_handle_grip", "dustpan_handle_grip")
+_TOOL_CREDIT = 0.1  # per tool, once, for a pinch on its handle
+_DUSTPAN_CREDIT = 0.3  # per brushed scrap resting on the dustpan, divided by the active count
+_BIN_CREDIT = 0.8  # per brushed scrap in the bin, divided by the active count
+_NO_ACTOR, _BRUSH, _GRIPPER = 0, 1, 2
+
+_GRIPPER_BODY_PARTS = ("link_left_finger", "link_right_finger", "_lf_rot", "_lf_down", "_rf_rot", "_rf_down")
+
+
+def _subtree_bodies(model: mujoco.MjModel, root: int) -> set[int]:
+    bodies = set()
+    for body in range(model.nbody):
+        current = body
+        while current > 0 and current != root:
+            current = int(model.body_parentid[current])
+        if current == root:
+            bodies.add(body)
+    return bodies
+
+
+def _body_geom_ids(model: mujoco.MjModel, body_name: str) -> set[int]:
+    body = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body_name)
+    if body < 0:
+        return set()
+    bodies = _subtree_bodies(model, body)
+    return {geom for geom in range(model.ngeom) if int(model.geom_bodyid[geom]) in bodies}
+
+
+def _named_geom_ids(model: mujoco.MjModel, geom_name: str) -> set[int]:
+    geom = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, geom_name)
+    return {int(geom)} if geom >= 0 else set()
+
+
+def _gripper_geom_ids(model: mujoco.MjModel) -> set[int]:
+    bodies: set[int] = set()
+    for body in range(model.nbody):
+        if any(part in (model.body(body).name or "") for part in _GRIPPER_BODY_PARTS):
+            bodies |= _subtree_bodies(model, body)
+    return {geom for geom in range(model.ngeom) if int(model.geom_bodyid[geom]) in bodies}
+
+
 class SweepAwayEvaluator:
     """Score sweep success from active paper scraps ending inside the bin.
 
-    Reset metadata defines the active set; without it, z height is used.
+    Reset metadata defines the active set; without it, a scrap is active once seen in front of
+    the robot (x >= 0, as the randomizer counts them) above ``active_z_min``. Unused scraps are
+    parked behind the robot (x < 0) at table height, so height alone would count them.
+
+    The scraps must be swept, not carried: by default (``fail_on_gripper_carry``)
+    an active scrap that touches a gripper while it touches none of its supports
+    (the table, the dustpan, the bin) is carried, and the episode fails for good
+    (no success, reward 0, ``ever_failed``). Brushing past a scrap that rests on
+    a support does not count. Contacts come from ``evaluate_model_data``, which
+    the environment calls every control step; qpos-only scoring keeps the
+    latched state but cannot detect new carries.
+
+    By default (``staged_reward``) the reward follows the sweep: 0.1 per tool
+    once a gripper pinches its handle (both fingers on the handle grip), 0.3/N
+    per scrap the brush swept onto the dustpan while it rests there, and 0.8/N
+    per such scrap in the bin, so tools plus every scrap in the bin is 1.0. A
+    scrap counts as brushed when the last thing that pushed it onto the dustpan
+    was the brush, directly or through another scrap the brush pushed; a
+    gripper touching it afterwards cancels that until the brush sweeps it on
+    again. Scraps that reach the bin any other way earn nothing and block
+    success. Without contacts (qpos-only calls) the reward is the fraction of
+    scraps in the bin, as with the flag off.
     """
 
     def __init__(
@@ -47,6 +109,8 @@ class SweepAwayEvaluator:
         active_z_min: float = -0.25,
         bin_radial_margin_m: float = 0.005,
         bin_height_margin_m: float = 0.005,
+        fail_on_gripper_carry: bool = True,
+        staged_reward: bool = True,
     ) -> None:
         self.model = model
         self.spec = spec
@@ -54,6 +118,8 @@ class SweepAwayEvaluator:
         self.active_z_min = float(active_z_min)
         self.bin_radial_margin_m = float(bin_radial_margin_m)
         self.bin_height_margin_m = float(bin_height_margin_m)
+        self.fail_on_gripper_carry = bool(fail_on_gripper_carry)
+        self.staged_reward = bool(staged_reward)
 
         self.trash_names, self._trash_qpos_addrs = self._resolve_trash_qpos_addrs(model)
         self._bin_qpos_adr = self._resolve_joint_qpos_adr(model, "bin_joint")
@@ -63,6 +129,34 @@ class SweepAwayEvaluator:
         self._fixed_active_trash_mask = False
         self._max_scraps_in_bin = np.zeros((1,), dtype=np.int32)
         self._ever_success = np.zeros((1,), dtype=bool)
+        self._carried = np.zeros((1, len(self.trash_names)), dtype=bool)
+        self._trash_geom_ids = [_body_geom_ids(model, name) for name in self.trash_names]
+        self._gripper_geom_ids = _gripper_geom_ids(model)
+        self._support_geom_ids = (
+            _body_geom_ids(model, "bin_container") | _body_geom_ids(model, "dustpan") | _named_geom_ids(model, "table_plane")
+        )
+        self._brush_geom_ids = _body_geom_ids(model, "brush")
+        self._pan_geom_ids = _body_geom_ids(model, "dustpan") - _named_geom_ids(model, "dustpan_handle_grip")
+        self._handle_geom_ids = [_named_geom_ids(model, name) for name in _TOOL_HANDLES]
+        self._trash_owner = {geom: index for index, geoms in enumerate(self._trash_geom_ids) for geom in geoms}
+        # Contact keys: 0..n-1 are scraps, n.. are tool handles.
+        self._contact_owner = {
+            **self._trash_owner,
+            **{geom: len(self.trash_names) + index for index, geoms in enumerate(self._handle_geom_ids) for geom in geoms},
+        }
+        # One (left finger, right finger) pair per arm; a pinch needs both of one pair.
+        self._finger_pairs = [
+            (_body_geom_ids(model, f"{arm}_link_left_finger"), _body_geom_ids(model, f"{arm}_link_right_finger"))
+            for arm in ("left", "right")
+        ]
+        self._reset_sweep_state()
+
+    def _reset_sweep_state(self) -> None:
+        shape = (self._nworld, len(self.trash_names))
+        self._last_actor = np.full(shape, _NO_ACTOR, dtype=np.int8)
+        self._on_pan = np.zeros(shape, dtype=bool)
+        self._brushed = np.zeros(shape, dtype=bool)
+        self._tools_grasped = np.zeros((self._nworld, len(_TOOL_HANDLES)), dtype=bool)
 
     def reset(self, *, nworld: int = 1) -> None:
         self._nworld = int(nworld)
@@ -70,6 +164,53 @@ class SweepAwayEvaluator:
         self._fixed_active_trash_mask = False
         self._max_scraps_in_bin = np.zeros((self._nworld,), dtype=np.int32)
         self._ever_success = np.zeros((self._nworld,), dtype=bool)
+        self._carried = np.zeros((self._nworld, len(self.trash_names)), dtype=bool)
+        self._reset_sweep_state()
+
+    def evaluate_model_data(self, model: mujoco.MjModel, data: mujoco.MjData) -> TaskEvalResult:
+        """Score the current state, first latching carries and who pushed each scrap."""
+        if self._nworld != 1:
+            self.reset(nworld=1)
+        num_trash = len(self.trash_names)
+        touching: list[set[int]] = [set() for _ in range(num_trash + len(_TOOL_HANDLES))]
+        owner = self._contact_owner
+        for contact in data.contact[: data.ncon]:
+            for mine, other in ((int(contact.geom1), int(contact.geom2)), (int(contact.geom2), int(contact.geom1))):
+                if mine in owner:
+                    touching[owner[mine]].add(other)
+        scraps = touching[:num_trash]
+        carried = np.array(
+            [bool(t & self._gripper_geom_ids) and not (t & self._support_geom_ids) for t in scraps], dtype=bool
+        )
+        self._carried[0] |= carried
+        self._track_sweep(scraps, touching[num_trash:])
+        return self._score(np.asarray(data.qpos, dtype=np.float32)[None, :], contacts=True)
+
+    def _track_sweep(self, scraps: list[set[int]], handles: list[set[int]]) -> None:
+        for index, touched in enumerate(handles):
+            if any(touched & left and touched & right for left, right in self._finger_pairs):
+                self._tools_grasped[0, index] = True
+        gripper = np.array([bool(t & self._gripper_geom_ids) for t in scraps], dtype=bool)
+        brush = np.array([bool(t & self._brush_geom_ids) for t in scraps], dtype=bool)
+        on_pan = np.array([bool(t & self._pan_geom_ids) for t in scraps], dtype=bool)
+        actor = self._last_actor[0]
+        actor[brush] = _BRUSH
+        actor[gripper] = _GRIPPER
+        # A scrap pushed by another scrap takes that scrap's pusher; a gripper outranks the brush.
+        pushed = actor.copy()
+        for index, touched in enumerate(scraps):
+            if brush[index] or gripper[index]:
+                continue
+            for other in {self._trash_owner[g] for g in touched if g in self._trash_owner}:
+                pushed[index] = max(pushed[index], actor[other])
+        actor[:] = pushed
+        arrived = on_pan & ~self._on_pan[0]
+        self._brushed[0, arrived] = actor[arrived] == _BRUSH
+        self._brushed[0, gripper] = False
+        self._on_pan[0] = on_pan
+
+    def evaluate_qpos_batch(self, qpos_batch: np.ndarray) -> TaskEvalResult:
+        return self._score(qpos_batch, contacts=False)
 
     @staticmethod
     def _normalize_trash_joint_name(joint_name: str) -> str:
@@ -192,7 +333,7 @@ class SweepAwayEvaluator:
 
         return 0.087, -0.084, 0.118
 
-    def evaluate_qpos_batch(self, qpos_batch: np.ndarray) -> TaskEvalResult:
+    def _score(self, qpos_batch: np.ndarray, *, contacts: bool) -> TaskEvalResult:
         qpos_batch = np.asarray(qpos_batch, dtype=np.float32)
         if qpos_batch.ndim != 2 or qpos_batch.shape[1] != self.model.nq:
             raise ValueError(
@@ -206,7 +347,7 @@ class SweepAwayEvaluator:
             axis=1,
         )
         if not self._fixed_active_trash_mask:
-            self._active_trash_mask |= trash_positions[..., 2] > self.active_z_min
+            self._active_trash_mask |= (trash_positions[..., 0] >= 0.0) & (trash_positions[..., 2] > self.active_z_min)
 
         bin_pos = qpos_batch[:, self._bin_qpos_adr : self._bin_qpos_adr + 3]
         bin_quat = qpos_batch[:, self._bin_qpos_adr + 3 : self._bin_qpos_adr + 7]
@@ -243,8 +384,22 @@ class SweepAwayEvaluator:
         ).sum(axis=1).astype(np.int32)
 
         denom = np.maximum(active_count, 1).astype(np.float32)
-        reward = np.where(active_count > 0, num_scraps_in_bin.astype(np.float32) / denom, 0.0)
-        success = (active_count > 0) & (num_scraps_in_bin == active_count)
+        staged = self.staged_reward and contacts
+        brushed = self._brushed & self._active_trash_mask
+        if staged:
+            brushed_in_bin = (in_bin_mask & brushed).sum(axis=1)
+            brushed_on_pan = (self._on_pan & brushed & ~in_bin_mask).sum(axis=1)
+            reward = _TOOL_CREDIT * self._tools_grasped.sum(axis=1) + np.where(
+                active_count > 0, (_DUSTPAN_CREDIT * brushed_on_pan + _BIN_CREDIT * brushed_in_bin) / denom, 0.0
+            )
+            success = (active_count > 0) & (brushed_in_bin == active_count)
+        else:
+            reward = np.where(active_count > 0, num_scraps_in_bin.astype(np.float32) / denom, 0.0)
+            success = (active_count > 0) & (num_scraps_in_bin == active_count)
+        carried_mask = self._carried & self._active_trash_mask
+        failed = carried_mask.any(axis=1) if self.fail_on_gripper_carry else np.zeros_like(success)
+        success &= ~failed
+        reward = np.where(failed, 0.0, reward).astype(np.float32)
         self._max_scraps_in_bin = np.maximum(self._max_scraps_in_bin, num_scraps_in_bin)
         self._ever_success |= success
 
@@ -266,6 +421,16 @@ class SweepAwayEvaluator:
             "num_scraps_outside_table_footprint": num_scraps_outside_table_footprint,
             "num_scraps_inside_table_footprint": num_scraps_inside_table_footprint,
             "num_active_scraps": active_count,
+            "num_scraps_carried_by_gripper": carried_mask.sum(axis=1).astype(np.int32),
+            "carried_scraps": [
+                [name for name, carried in zip(self.trash_names, world) if bool(carried)] for world in carried_mask
+            ],
+            "ever_failed": failed.copy(),
+            "staged_reward": staged,
+            "tools_grasped": self._tools_grasped.copy(),
+            "num_scraps_on_dustpan": (self._on_pan & self._active_trash_mask).sum(axis=1).astype(np.int32),
+            "num_brushed_scraps_on_dustpan": (self._on_pan & brushed & ~in_bin_mask).sum(axis=1).astype(np.int32),
+            "num_brushed_scraps_in_bin": (in_bin_mask & brushed).sum(axis=1).astype(np.int32),
             "max_scraps_in_bin_so_far": self._max_scraps_in_bin.copy(),
             "ever_success": self._ever_success.copy(),
             "trash_in_bin_mask": in_bin_mask,

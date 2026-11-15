@@ -121,7 +121,9 @@ class MugResetRequest:
             combos: list[tuple[str, ...]] = []
             for raw_combo in raw_variant_combos:
                 if isinstance(raw_combo, str):
-                    combo = tuple(item.strip() for item in raw_combo.split(",") if item.strip())
+                    combo = tuple(
+                        item.strip() for item in raw_combo.split(",") if item.strip()
+                    )
                 else:
                     combo = tuple(str(variant) for variant in raw_combo)
                 combos.append(combo)
@@ -247,7 +249,9 @@ class ChessResetRequest:
             color_mode=None if color_mode is None else str(color_mode),
             tin_variant=None if tin_variant is None else str(tin_variant),
             cycle_scenario=0 if raw_cycle_scenario is None else int(raw_cycle_scenario),
-            cycle_color_mode=0 if raw_cycle_color_mode is None else int(raw_cycle_color_mode),
+            cycle_color_mode=0
+            if raw_cycle_color_mode is None
+            else int(raw_cycle_color_mode),
             cycle_tin=0 if raw_cycle_tin is None else int(raw_cycle_tin),
             randomize_variants=randomize_variants,
             randomize_scales=randomize_scales,
@@ -294,8 +298,13 @@ class SortingResetRequest:
         if self.bin_visual_style is not None and (
             not isinstance(self.bin_visual_style, str) or not self.bin_visual_style
         ):
-            raise ValueError("bin_visual_style must be a nonempty string when supplied.")
-        if type(self.park_inactive) is not bool or type(self.randomize_scales) is not bool:
+            raise ValueError(
+                "bin_visual_style must be a nonempty string when supplied."
+            )
+        if (
+            type(self.park_inactive) is not bool
+            or type(self.randomize_scales) is not bool
+        ):
             raise TypeError("Sorting reset flags must be booleans.")
 
     @classmethod
@@ -324,7 +333,8 @@ class NutsBoltsResetRequest(SortingResetRequest):
         for name in ("nut_count", "bolt_count"):
             value = getattr(self, name)
             if value is not None and (
-                type(value) is not int or not 1 <= value <= _NUTS_BOLTS_MAX_OBJECTS_PER_TYPE
+                type(value) is not int
+                or not 1 <= value <= _NUTS_BOLTS_MAX_OBJECTS_PER_TYPE
             ):
                 raise ValueError(
                     f"{name} must be an integer between 1 and {_NUTS_BOLTS_MAX_OBJECTS_PER_TYPE}."
@@ -348,6 +358,40 @@ class LegoBlocksResetRequest(SortingResetRequest):
             )
 
 
+@dataclass(frozen=True)
+class ConveyorPickResetRequest:
+    """Optional reset controls for the conveyor randomizer: belt speed bounds in m/s."""
+
+    belt_speed_min_m_s: float | None = None
+    belt_speed_max_m_s: float | None = None
+
+    @classmethod
+    def from_value(cls, value: Any | None) -> "ConveyorPickResetRequest":
+        if value is None:
+            return cls()
+        if isinstance(value, cls):
+            return value
+        if not isinstance(value, dict):
+            raise TypeError(
+                "Conveyor reset request must be a dict or ConveyorPickResetRequest, "
+                f"got {type(value).__name__}"
+            )
+        unknown = set(value) - {"belt_speed_min_m_s", "belt_speed_max_m_s"}
+        if unknown:
+            raise ValueError(
+                f"Conveyor reset request has unknown keys: {sorted(unknown)}"
+            )
+
+        def _optional_float(key: str) -> float | None:
+            raw = value.get(key)
+            return None if raw is None else float(raw)
+
+        return cls(
+            belt_speed_min_m_s=_optional_float("belt_speed_min_m_s"),
+            belt_speed_max_m_s=_optional_float("belt_speed_max_m_s"),
+        )
+
+
 class _SweepPlacementFailure(RuntimeError):
     """Internal signal that one sweep placement attempt should be retried."""
 
@@ -360,4 +404,4 @@ class _ChessPlacementFailure(RuntimeError):
     """Internal signal that one chess placement attempt should be retried."""
 
 
-__all__ = [name for name in globals() if not name.startswith('__')]
+__all__ = [name for name in globals() if not name.startswith("__")]

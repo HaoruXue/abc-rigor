@@ -15,7 +15,7 @@ from abc_sim.spelling_placement import (
     score_free_placement,
 )
 from abc_sim.task_eval.base import TaskEvalResult
-from abc_sim.task_eval.dishrack import _gripper_geom_ids
+from abc_sim.task_eval.contacts import gripper_geom_ids
 from abc_sim.task_eval.spell import SpellWordEvaluator
 from abc_sim.task_specs import SimTaskSpec
 
@@ -88,7 +88,7 @@ class FreePlacementSpellingEvaluator:
             self.cfg,
             model,
             body_names=[f"block_{letter}" for letter in self._letters],
-            robot_geom_ids=_gripper_geom_ids(model),
+            robot_geom_ids=gripper_geom_ids(model),
         )
         self._support = None
         self._physics_steps = 0

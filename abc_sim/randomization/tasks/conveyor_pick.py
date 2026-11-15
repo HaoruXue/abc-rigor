@@ -9,6 +9,7 @@ import numpy as np
 from ..assets.inhand import _inhand_parse_model_xml
 from ..assets.paths import _MODELS_DIR
 from ..core import RandomizationState, SceneRandomizer, _parse_float_list
+from ..requests import ConveyorPickResetRequest
 
 _CONVEYOR_PICK_BASE_SCENE_XML = _MODELS_DIR / "yam_conveyor_pick_scene.xml"
 _CONVEYOR_PICK_OBJECT_ASSET_ROOT = _MODELS_DIR / "assets" / "task_conveyor_pick" / "objects"
@@ -56,6 +57,34 @@ _CONVEYOR_Y_JITTER_M = (-0.005, 0.005)
 _CONVEYOR_BELT_TOP_Z = 0.805 + 0.018
 _CONVEYOR_OBJECT_SPAWN_CLEARANCE_M = 0.0005
 _CONVEYOR_BELT_SPEED_RANGE_M_S = (0.10, 0.20)
+_CONVEYOR_BELT_SPEED_LIMITS_M_S = (0.01, 0.50)
+
+
+def _conveyor_belt_speed_range(request: Any | None) -> tuple[float, float]:
+    """Belt speed bounds for this reset: the defaults unless the request overrides either one."""
+    reset_request = ConveyorPickResetRequest.from_value(request)
+    default_low, default_high = _CONVEYOR_BELT_SPEED_RANGE_M_S
+    low = default_low if reset_request.belt_speed_min_m_s is None else reset_request.belt_speed_min_m_s
+    high = default_high if reset_request.belt_speed_max_m_s is None else reset_request.belt_speed_max_m_s
+    lowest, highest = _CONVEYOR_BELT_SPEED_LIMITS_M_S
+    if not lowest <= low <= high <= highest:
+        raise ValueError(
+            f"conveyor_pick belt speed bounds must satisfy {lowest} <= min <= max <= {highest} m/s, got {low}, {high}"
+        )
+    return low, high
+    if not isinstance(request, dict):
+        raise TypeError(f"conveyor_pick reset request must be a dict, got {type(request).__name__}")
+    unknown = set(request) - {"belt_speed_min_m_s", "belt_speed_max_m_s"}
+    if unknown:
+        raise ValueError(f"conveyor_pick reset request has unknown keys: {sorted(unknown)}")
+    low = float(request.get("belt_speed_min_m_s", low))
+    high = float(request.get("belt_speed_max_m_s", high))
+    lowest, highest = _CONVEYOR_BELT_SPEED_LIMITS_M_S
+    if not lowest <= low <= high <= highest:
+        raise ValueError(
+            f"conveyor_pick belt speed bounds must satisfy {lowest} <= min <= max <= {highest} m/s, got {low}, {high}"
+        )
+    return low, high
 
 
 def _conveyor_pick_collision_bottom_z(variant_dir: _Path) -> float:
@@ -299,7 +328,8 @@ class ConveyorPickObjectRandomizer(SceneRandomizer):
         belt_direction_y = 1.0 if mirrored else -1.0
         spawn_side_y = -belt_direction_y
         selections = self._sample_selections(spawn_side_y=spawn_side_y)
-        belt_speed_m_s = float(self._rng.uniform(*_CONVEYOR_BELT_SPEED_RANGE_M_S))
+        belt_speed_range_m_s = _conveyor_belt_speed_range(request)
+        belt_speed_m_s = float(self._rng.uniform(*belt_speed_range_m_s))
         belt_speed_y = belt_direction_y * belt_speed_m_s
         xml = _conveyor_pick_build_xml(selections)
         xml = _conveyor_pick_apply_scene_transforms(
@@ -349,6 +379,7 @@ class ConveyorPickObjectRandomizer(SceneRandomizer):
                 "spawn_side_y": spawn_side_y,
                 "belt_speed_m_s": belt_speed_m_s,
                 "belt_speed_y": belt_speed_y,
+                "belt_speed_range_m_s": list(belt_speed_range_m_s),
             },
         )
 
