@@ -85,7 +85,7 @@ class MuJoCoYAMEnv(gym.Env):
         self,
         config: RobotSystemConfig,
         chunk_dim: int = 30,
-        prompt: str = "fold the towel",
+        prompt: str | None = None,
         render_cameras: bool = True,
         camera_backend: LiveRenderBackend = "mujoco",
         camera_gpu_id: int | None = None,
@@ -100,7 +100,8 @@ class MuJoCoYAMEnv(gym.Env):
         super().__init__()
         self.config = config
         self.chunk_dim = chunk_dim
-        self.prompt = prompt
+        self._prompt_override = prompt
+        self.prompt = "fold the towel" if prompt is None else prompt
         self._render_cameras_flag = render_cameras
         self._camera_backend: LiveRenderBackend = camera_backend
         self._camera_gpu_id = camera_gpu_id
@@ -609,12 +610,27 @@ class MuJoCoYAMEnv(gym.Env):
         return self.project_state_from_qpos(self.data.qpos)
 
     def set_task(self, task: str | SimTaskSpec) -> None:
-        """Configure the task name and attach any registered evaluator."""
+        """Bind task reset options, prompt, and evaluator.
+
+        An explicit constructor prompt remains the caller's override. Episode
+        randomization and task runtimes can still supply a live prompt on reset.
+        """
 
         resolved = resolve_task(task)
         self._task_request = task
         self._task = resolved.env_task or task
         self._task_spec = resolved.task_spec or maybe_get_task_spec(task)
+        self._task_reset_request = (
+            self._task_spec.reset_request_options() if self._task_spec is not None else None
+        )
+        if self._prompt_override is not None:
+            self.prompt = self._prompt_override
+        elif self._task_spec is not None:
+            self.prompt = self._task_spec.prompt
+        elif isinstance(task, str) and task:
+            self.prompt = task.replace("_", " ")
+        else:
+            self.prompt = "fold the towel"
         self._bind_task_evaluator()
         self._task_runtime = make_task_runtime(
             resolved.task_spec or self._task,

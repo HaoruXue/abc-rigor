@@ -39,3 +39,10 @@ In random mode, the `word` metric has a world axis so batched worlds can retain
 different targets. In fixed-word mode it remains a scalar string. A separate
 evaluator discovers metric axes without changing a live episode's goal or
 success history. A custom spec does not add an entry to the base task catalogue.
+
+Use `env.set_task(other_spelling_spec)` to switch spelling goals on the same
+blocks scene. This replaces the task's reset request, prompt, and evaluator;
+switching back to `env.set_task("spell_cat")` clears the random-sequence request
+and restores the fixed-task prompt. An explicit `make_env(..., prompt=...)`
+override is retained when switching tasks. Sampled reset prompts still describe
+the realized goal during random-sequence episodes, as they do on initial reset.

@@ -113,6 +113,56 @@ class SpellingGoalTest(unittest.TestCase):
 
 
 class SpellingResetTest(unittest.TestCase):
+    def test_switching_tasks_rebinds_reset_goal_prompt_and_evaluator(self):
+        env = make_env(
+            task=spelling_spec(2),
+            scene_xml_string=blocks_xml(),
+            render_cameras=False,
+        )
+        self.addCleanup(env.close)
+        for spec in (spelling_spec(2), spelling_spec(3), get_task_spec("spell_cat")):
+            with self.subTest(spec=spec):
+                env.set_task(spec)
+                observation, info = env.reset(seed=31)
+                metadata = info["randomization"].metadata
+                if spec.reset_request:
+                    goal = SpellingGoal.from_metadata(metadata)
+                    self.assertEqual(
+                        len(goal.sequence), spec.evaluator_kwargs()["sequence_length"]
+                    )
+                    self.assertEqual(observation["prompt"], goal.prompt)
+                    word = goal.sequence
+                    expected_word_metric = [word]
+                else:
+                    self.assertNotIn("spelling_goal", metadata)
+                    self.assertEqual(observation["prompt"], "spell cat")
+                    word = "CAT"
+                    expected_word_metric = word
+                env.data.qpos[:] = row_state(env.model, word)[0]
+                result = env.evaluate_task()
+                self.assertTrue(result.scalar_success())
+                self.assertEqual(result.metrics["word"], expected_word_metric)
+
+    def test_explicit_prompt_override_returns_after_randomized_task(self):
+        for prompt in ("use the caller's spelling instruction", ""):
+            with self.subTest(prompt=prompt):
+                env = make_env(
+                    task=spelling_spec(2),
+                    prompt=prompt,
+                    scene_xml_string=blocks_xml(),
+                    render_cameras=False,
+                )
+                self.addCleanup(env.close)
+                self.assertEqual(env.prompt, prompt)
+                observation, info = env.reset(seed=31)
+                goal = SpellingGoal.from_metadata(info["randomization"].metadata)
+                self.assertEqual(observation["prompt"], goal.prompt)
+                env.set_task("spell_cat")
+                self.assertEqual(env.prompt, prompt)
+                observation, info = env.reset(seed=31)
+                self.assertEqual(observation["prompt"], prompt)
+                self.assertNotIn("spelling_goal", info["randomization"].metadata)
+
     def test_goal_sampling_preserves_default_pose_randomization(self):
         model = mujoco.MjModel.from_xml_string(blocks_xml())
         data = mujoco.MjData(model)
