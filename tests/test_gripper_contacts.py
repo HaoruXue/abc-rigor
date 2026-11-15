@@ -12,6 +12,7 @@ import xml.etree.ElementTree as ET
 
 import mujoco
 import numpy as np
+from grasp_fixture import close_and_lift
 
 import abc_sim
 
@@ -54,9 +55,7 @@ class GripperContactsTest(unittest.TestCase):
             geom
             for geom in range(model.ngeom)
             if model.geom_type[geom] == mujoco.mjtGeom.mjGEOM_BOX
-            and model.body(int(model.geom_bodyid[geom])).name.endswith(
-                ("_lf_down", "_rf_down")
-            )
+            and model.body(int(model.geom_bodyid[geom])).name.endswith(("_lf_down", "_rf_down"))
         }
         self.assertEqual(len(pads), 8)
         for arm in ("left", "right"):
@@ -78,9 +77,7 @@ class GripperContactsTest(unittest.TestCase):
             # Some offsets engage the fingertip spheres. Each arm must also exercise
             # the pads and use their higher-priority contact material during a lift.
             with self.subTest(part=body_name, arm=arm, check="resolved_material"):
-                self.assertTrue(
-                    pad_materials, f"{arm} grasps did not exercise the finger pads"
-                )
+                self.assertTrue(pad_materials, f"{arm} grasps did not exercise the finger pads")
                 for solref, solimp, friction in pad_materials:
                     np.testing.assert_allclose(solref, [0.004, 1])
                     np.testing.assert_allclose(solimp, [0.998, 0.998, 0.001, 0.5, 2])
@@ -107,9 +104,7 @@ class GripperContactsTest(unittest.TestCase):
         finger_geoms = {
             geom
             for geom in range(model.ngeom)
-            if model.body(int(model.geom_bodyid[geom])).name.startswith(
-                (f"{arm}_lf_", f"{arm}_rf_")
-            )
+            if model.body(int(model.geom_bodyid[geom])).name.startswith((f"{arm}_lf_", f"{arm}_rf_"))
         }
         # Remove other loose objects from this isolated grasp without changing contacts.
         for other in range(model.njnt):
@@ -128,16 +123,12 @@ class GripperContactsTest(unittest.TestCase):
         rotation = site.xmat.reshape(3, 3).copy()
         grasp_local = np.array([offset, 0, -0.020])
         initial_point = site.xpos + rotation @ grasp_local
-        data.qpos[address : address + 3] = (
-            initial_point - rotation @ model.body_ipos[body]
-        )
+        data.qpos[address : address + 3] = initial_point - rotation @ model.body_ipos[body]
         mujoco.mju_mat2Quat(data.qpos[address + 3 : address + 7], rotation.ravel())
         mujoco.mj_forward(model, data)
         for contact in data.contact:
             if set(contact.geom) & part_geoms:
-                self.assertGreaterEqual(
-                    contact.dist, -1e-5, "Grasp starts in penetration"
-                )
+                self.assertGreaterEqual(contact.dist, -1e-5, "Grasp starts in penetration")
 
         contact_count = 0
         max_penetration = 0.0
@@ -160,56 +151,9 @@ class GripperContactsTest(unittest.TestCase):
                             )
                         )
 
-        dt = model.opt.timestep
-        gripper = model.actuator(arm + "_gripper").id
-        for n in range(round(close_seconds / dt)):
-            data.ctrl[gripper] = 0.0475 * max(0, 1 - n * dt / 0.5)
-            step()
-        mujoco.mj_forward(model, data)
-        start_site = data.site(site_id).xpos.copy()
-        target_position = start_site + [0, 0, 0.080]
-        target_quaternion = np.empty(4)
-        mujoco.mju_mat2Quat(target_quaternion, data.site(site_id).xmat)
-        joints = [model.joint(f"{arm}_joint{i}").id for i in range(1, 7)]
-        qpos_indices = model.jnt_qposadr[joints]
-        dof_indices = model.jnt_dofadr[joints]
-        actuators = [model.actuator(f"{arm}_joint{i}").id for i in range(1, 7)]
-        kinematics = mujoco.MjData(model)
-        mujoco.mj_copyData(kinematics, model, data)
-        # Solve a single 8 cm lift while retaining the grasp orientation.
-        for _ in range(200):
-            mujoco.mj_forward(model, kinematics)
-            site = kinematics.site(site_id)
-            quaternion, angular_error = np.empty(4), np.empty(3)
-            mujoco.mju_mat2Quat(quaternion, site.xmat)
-            mujoco.mju_subQuat(angular_error, target_quaternion, quaternion)
-            angular_error = site.xmat.reshape(3, 3) @ angular_error
-            error = np.r_[target_position - site.xpos, angular_error]
-            if np.linalg.norm(error) < 1e-5:
-                break
-            jac_position = np.zeros((3, model.nv))
-            jac_rotation = np.zeros((3, model.nv))
-            mujoco.mj_jacSite(model, kinematics, jac_position, jac_rotation, site_id)
-            jacobian = np.vstack(
-                [jac_position[:, dof_indices], jac_rotation[:, dof_indices]]
-            )
-            kinematics.qpos[qpos_indices] += jacobian.T @ np.linalg.solve(
-                jacobian @ jacobian.T + np.eye(6) * 1e-5, error
-            )
-        self.assertLess(np.linalg.norm(error), 1e-5, "Lift target is unreachable")
-        goal = kinematics.qpos[qpos_indices].copy()
-        self.assertTrue(np.all(goal >= model.jnt_range[joints, 0]))
-        self.assertTrue(np.all(goal <= model.jnt_range[joints, 1]))
-        before = data.qpos[qpos_indices].copy()
-        model.opt.gravity[:] = gravity
-        for n in range(round(2.5 / dt)):
-            data.ctrl[actuators] = before + (goal - before) * min(1, (n + 1) * dt / 1.5)
-            step()
-        mujoco.mj_forward(model, data)
+        start_site = close_and_lift(self, model, data, arm, gravity, step, close_seconds=close_seconds)
         site = data.site(site_id)
-        retention_error = np.linalg.norm(
-            site.xmat.reshape(3, 3).T @ (data.xipos[body] - site.xpos) - grasp_local
-        )
+        retention_error = np.linalg.norm(site.xmat.reshape(3, 3).T @ (data.xipos[body] - site.xpos) - grasp_local)
         part_lift = data.xipos[body, 2] - initial_point[2]
         tcp_lift = site.xpos[2] - start_site[2]
         measurements = {
