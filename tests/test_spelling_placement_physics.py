@@ -166,9 +166,10 @@ class NativeSpellingPlacementTests(unittest.TestCase):
         self.env.model, self.env.data = self.model, self.data
         self.env._task_runtime = None
         self.env._task_evaluator = self.evaluator
-        self.env._physics_observer = self.evaluator.after_physics_step
         self.env._task_spec = self.evaluator.spec
         self.env._control_decimation = 34
+        self.env._cache_task_evaluator_requirements()
+        self.env._physics_observer = self.evaluator.after_physics_step
         self.env.single_timestep_action_dim = 14
         self.env._ctrl_indices = list(reversed(range(14)))
         self.env._gripper_set = {6, 13}
@@ -233,6 +234,45 @@ class NativeSpellingPlacementTests(unittest.TestCase):
         )
         self.assertEqual(evidence["score"]["reward"], 1)
         self.assertEqual(evidence["contact_scope"], "finger-subtrees-v1")
+
+    def test_native_score_reads_do_not_refresh_solved_contact_state(self):
+        self.env.advance_physics(17)
+        with patch("abc_sim.env.mujoco.mj_fwdPosition") as refresh:
+            first = self.env.evaluate_task()
+            second = self.env.evaluate_task()
+        refresh.assert_not_called()
+        self.assertEqual(first.to_info(squeeze=True), second.to_info(squeeze=True))
+        self.assertEqual(first.metrics["verifier_sample_count"], 1)
+
+    def test_task_switch_rebinds_temporal_cadence_and_clears_native_episode_state(self):
+        timed = SimpleNamespace(
+            requires_step_updates=True,
+            evaluate_at_control_rate=True,
+            evaluate_model_data=Mock(return_value=SimpleNamespace()),
+        )
+        resolved = SimpleNamespace(task_spec=self.evaluator.spec, env_task="timed")
+        with (
+            patch("abc_sim.env.resolve_task", return_value=resolved),
+            patch("abc_sim.env.make_task_evaluator", return_value=timed),
+            patch("abc_sim.env.make_task_runtime", return_value=None),
+        ):
+            self.env.set_task("timed")
+        self.assertIsNone(self.env._physics_observer)
+        self.assertTrue(self.env._step_updates)
+        self.assertEqual(self.env._step_update_interval, 34)
+        self.env.advance_physics(35)
+        self.assertEqual(timed.evaluate_model_data.call_count, 2)
+        self.assertIsNotNone(self.env._step_task_eval)
+        with (
+            patch("abc_sim.env.resolve_task", return_value=resolved),
+            patch("abc_sim.env.make_task_evaluator", return_value=self.evaluator),
+            patch("abc_sim.env.make_task_runtime", return_value=None),
+        ):
+            self.env.set_task(self.evaluator.spec)
+        self.assertIsNone(self.env._physics_observer)
+        self.assertFalse(self.env._step_updates)
+        self.assertEqual(self.env._step_update_interval, 1)
+        self.assertIsNone(self.env._step_task_eval)
 
     def test_short_high_level_cadence_rejects_before_reset_step_or_chunk_mutation(self):
         import numpy as np

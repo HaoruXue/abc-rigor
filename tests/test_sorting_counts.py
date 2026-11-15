@@ -203,7 +203,8 @@ class SortingCountsTest(unittest.TestCase):
         np.testing.assert_array_equal(result.metrics["active_object_count"], [3, 6])
         np.testing.assert_array_equal(result.metrics["num_correct"], [2, 5])
         np.testing.assert_array_equal(result.metrics["num_wrong_bin"], [1, 0])
-        np.testing.assert_allclose(result.reward, [2 / 3, 5 / 6])
+        # The wrong-bin penalty cancels one correct block in the first world.
+        np.testing.assert_allclose(result.reward, [1 / 3, 5 / 6])
         np.testing.assert_array_equal(result.success, [False, False])
         np.testing.assert_array_equal(result.metrics["ever_success"], [False, False])
 
