@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from typing import Any
 
 import mujoco
 import numpy as np
 
 from abc_sim.task_eval.base import TaskEvalResult
+from abc_sim.task_eval.contacts import gripper_geom_ids, subtree_geom_ids
 from abc_sim.task_specs import SimTaskSpec
 
 
@@ -38,39 +40,17 @@ _DUSTPAN_CREDIT = 0.3  # per brushed scrap resting on the dustpan, divided by th
 _BIN_CREDIT = 0.8  # per brushed scrap in the bin, divided by the active count
 _NO_ACTOR, _BRUSH, _GRIPPER = 0, 1, 2
 
-_GRIPPER_BODY_PARTS = ("link_left_finger", "link_right_finger", "_lf_rot", "_lf_down", "_rf_rot", "_rf_down")
-
-
-def _subtree_bodies(model: mujoco.MjModel, root: int) -> set[int]:
-    bodies = set()
-    for body in range(model.nbody):
-        current = body
-        while current > 0 and current != root:
-            current = int(model.body_parentid[current])
-        if current == root:
-            bodies.add(body)
-    return bodies
-
 
 def _body_geom_ids(model: mujoco.MjModel, body_name: str) -> set[int]:
     body = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body_name)
     if body < 0:
         return set()
-    bodies = _subtree_bodies(model, body)
-    return {geom for geom in range(model.ngeom) if int(model.geom_bodyid[geom]) in bodies}
+    return subtree_geom_ids(model, body)
 
 
 def _named_geom_ids(model: mujoco.MjModel, geom_name: str) -> set[int]:
     geom = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, geom_name)
     return {int(geom)} if geom >= 0 else set()
-
-
-def _gripper_geom_ids(model: mujoco.MjModel) -> set[int]:
-    bodies: set[int] = set()
-    for body in range(model.nbody):
-        if any(part in (model.body(body).name or "") for part in _GRIPPER_BODY_PARTS):
-            bodies |= _subtree_bodies(model, body)
-    return {geom for geom in range(model.ngeom) if int(model.geom_bodyid[geom]) in bodies}
 
 
 class SweepAwayEvaluator:
@@ -84,9 +64,9 @@ class SweepAwayEvaluator:
     an active scrap that touches a gripper while it touches none of its supports
     (the table, the dustpan, the bin) is carried, and the episode fails for good
     (no success, reward 0, ``ever_failed``). Brushing past a scrap that rests on
-    a support does not count. Contacts come from ``evaluate_model_data``, which
-    the environment calls every control step; qpos-only scoring keeps the
-    latched state but cannot detect new carries.
+    a support does not count. Native physics hooks observe contacts after every
+    solved tick; ``evaluate_model_data`` reads the cached result without
+    advancing the history.
 
     By default (``staged_reward``) the reward follows the sweep: 0.1 per tool
     once a gripper pinches its handle (both fingers on the handle grip), 0.3/N
@@ -96,9 +76,12 @@ class SweepAwayEvaluator:
     was the brush, directly or through another scrap the brush pushed; a
     gripper touching it afterwards cancels that until the brush sweeps it on
     again. Scraps that reach the bin any other way earn nothing and block
-    success. Without contacts (qpos-only calls) the reward is the fraction of
-    scraps in the bin, as with the flag off.
+    success. Qpos-only scoring requires both ``staged_reward=False`` and
+    ``fail_on_gripper_carry=False``, explicitly selecting geometric bin scoring.
+    MJWarp replay does not support this native observer.
     """
+
+    evaluation_interval_steps = 1
 
     def __init__(
         self,
@@ -131,7 +114,7 @@ class SweepAwayEvaluator:
         self._ever_success = np.zeros((1,), dtype=bool)
         self._carried = np.zeros((1, len(self.trash_names)), dtype=bool)
         self._trash_geom_ids = [_body_geom_ids(model, name) for name in self.trash_names]
-        self._gripper_geom_ids = _gripper_geom_ids(model)
+        self._gripper_geom_ids = gripper_geom_ids(model)
         self._support_geom_ids = (
             _body_geom_ids(model, "bin_container") | _body_geom_ids(model, "dustpan") | _named_geom_ids(model, "table_plane")
         )
@@ -157,8 +140,13 @@ class SweepAwayEvaluator:
         self._on_pan = np.zeros(shape, dtype=bool)
         self._brushed = np.zeros(shape, dtype=bool)
         self._tools_grasped = np.zeros((self._nworld, len(_TOOL_HANDLES)), dtype=bool)
+        self._data = None
+        self._previous_time = None
+        self._result = None
 
     def reset(self, *, nworld: int = 1) -> None:
+        if nworld != 1 and (self.staged_reward or self.fail_on_gripper_carry):
+            raise NotImplementedError("Sweep contact history requires single-world native physics.")
         self._nworld = int(nworld)
         self._active_trash_mask = np.zeros((self._nworld, len(self.trash_names)), dtype=bool)
         self._fixed_active_trash_mask = False
@@ -167,10 +155,34 @@ class SweepAwayEvaluator:
         self._carried = np.zeros((self._nworld, len(self.trash_names)), dtype=bool)
         self._reset_sweep_state()
 
-    def evaluate_model_data(self, model: mujoco.MjModel, data: mujoco.MjData) -> TaskEvalResult:
-        """Score the current state, first latching carries and who pushed each scrap."""
+    def after_reset(self, model: mujoco.MjModel, data: mujoco.MjData) -> None:
+        """Capture the initial state after native reset randomization and settling."""
+        if model is not self.model:
+            raise ValueError("Sweep observations must use the evaluator's model.")
         if self._nworld != 1:
-            self.reset(nworld=1)
+            raise ValueError("Reset the sweep evaluator for one world before binding native physics.")
+        self._data = data
+        self._previous_time = float(data.time)
+        self._observe_model_data(data)
+
+    def after_physics_step(self, model: mujoco.MjModel, data: mujoco.MjData) -> None:
+        """Record one solved native tick and cache its score."""
+        if model is not self.model or data is not self._data:
+            raise RuntimeError("Reset sweep contact tracking before observing native physics.")
+        if not np.isclose(
+            float(data.time) - self._previous_time, model.opt.timestep, rtol=1e-7, atol=1e-12
+        ):
+            raise ValueError("Sweep contact history must observe every native physics step exactly once.")
+        self._previous_time = float(data.time)
+        self._observe_model_data(data)
+
+    def evaluate_model_data(self, model: mujoco.MjModel, data: mujoco.MjData) -> TaskEvalResult:
+        """Read the latest observation without changing contact history or scores."""
+        if model is not self.model or data is not self._data or self._result is None:
+            raise RuntimeError("Reset sweep contact tracking before reading its score.")
+        return deepcopy(self._result)
+
+    def _observe_model_data(self, data: mujoco.MjData) -> None:
         num_trash = len(self.trash_names)
         touching: list[set[int]] = [set() for _ in range(num_trash + len(_TOOL_HANDLES))]
         owner = self._contact_owner
@@ -184,7 +196,7 @@ class SweepAwayEvaluator:
         )
         self._carried[0] |= carried
         self._track_sweep(scraps, touching[num_trash:])
-        return self._score(np.asarray(data.qpos, dtype=np.float32)[None, :], contacts=True)
+        self._result = self._score(np.asarray(data.qpos, dtype=np.float32)[None, :])
 
     def _track_sweep(self, scraps: list[set[int]], handles: list[set[int]]) -> None:
         for index, touched in enumerate(handles):
@@ -194,23 +206,41 @@ class SweepAwayEvaluator:
         brush = np.array([bool(t & self._brush_geom_ids) for t in scraps], dtype=bool)
         on_pan = np.array([bool(t & self._pan_geom_ids) for t in scraps], dtype=bool)
         actor = self._last_actor[0]
-        actor[brush] = _BRUSH
-        actor[gripper] = _GRIPPER
-        # A scrap pushed by another scrap takes that scrap's pusher; a gripper outranks the brush.
-        pushed = actor.copy()
+        neighbors = [set() for _ in scraps]
         for index, touched in enumerate(scraps):
-            if brush[index] or gripper[index]:
-                continue
             for other in {self._trash_owner[g] for g in touched if g in self._trash_owner}:
-                pushed[index] = max(pushed[index], actor[other])
-        actor[:] = pushed
+                neighbors[index].add(other)
+                neighbors[other].add(index)
+        # Resolve each complete contact component before assigning dustpan arrival credit.
+        remaining = set(range(len(scraps)))
+        while remaining:
+            component = {remaining.pop()}
+            pending = list(component)
+            while pending:
+                for other in neighbors[pending.pop()] & remaining:
+                    remaining.remove(other)
+                    component.add(other)
+                    pending.append(other)
+            indices = list(component)
+            if gripper[indices].any():
+                pusher = _GRIPPER
+            elif brush[indices].any():
+                pusher = _BRUSH
+            else:
+                pusher = int(actor[indices].max())
+            actor[indices] = pusher
         arrived = on_pan & ~self._on_pan[0]
         self._brushed[0, arrived] = actor[arrived] == _BRUSH
-        self._brushed[0, gripper] = False
+        self._brushed[0, actor == _GRIPPER] = False
         self._on_pan[0] = on_pan
 
     def evaluate_qpos_batch(self, qpos_batch: np.ndarray) -> TaskEvalResult:
-        return self._score(qpos_batch, contacts=False)
+        if self.staged_reward or self.fail_on_gripper_carry:
+            raise NotImplementedError(
+                "Sweep scoring requires every native physics step and contact history. "
+                "Qpos-only geometric scoring requires staged_reward=False and fail_on_gripper_carry=False."
+            )
+        return self._score(qpos_batch)
 
     @staticmethod
     def _normalize_trash_joint_name(joint_name: str) -> str:
@@ -333,7 +363,7 @@ class SweepAwayEvaluator:
 
         return 0.087, -0.084, 0.118
 
-    def _score(self, qpos_batch: np.ndarray, *, contacts: bool) -> TaskEvalResult:
+    def _score(self, qpos_batch: np.ndarray) -> TaskEvalResult:
         qpos_batch = np.asarray(qpos_batch, dtype=np.float32)
         if qpos_batch.ndim != 2 or qpos_batch.shape[1] != self.model.nq:
             raise ValueError(
@@ -384,7 +414,7 @@ class SweepAwayEvaluator:
         ).sum(axis=1).astype(np.int32)
 
         denom = np.maximum(active_count, 1).astype(np.float32)
-        staged = self.staged_reward and contacts
+        staged = self.staged_reward
         brushed = self._brushed & self._active_trash_mask
         if staged:
             brushed_in_bin = (in_bin_mask & brushed).sum(axis=1)
