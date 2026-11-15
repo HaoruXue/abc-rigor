@@ -88,6 +88,23 @@ class BallTrayWindowTest(unittest.TestCase):
     def score(result):
         return result.scalar_success(), round(float(result.reward[0]), 4)
 
+    def make_runtime(self):
+        runtime = BallTrayBalancingRuntime()
+        runtime.bind(self.model, self.data)
+        runtime.after_reset(
+            self.model, self.data, randomization=SimpleNamespace(seed=0)
+        )
+        runtime.on_task_evaluation(self.sample(0, REST_Z))
+        runtime.after_step(self.model, self.data)
+        return runtime
+
+    def runtime_sample(self, runtime, t, z, **kwargs):
+        runtime.before_step(self.model, self.data)
+        result = self.sample(t, z, **kwargs)
+        runtime.on_task_evaluation(result)
+        runtime.after_step(self.model, self.data)
+        return result
+
     def test_hold_in_the_window_then_gentle_placement_succeeds(self):
         self.assertEqual(
             self.score(self.hold(1, 6)), (False, 0.45)
@@ -103,6 +120,150 @@ class BallTrayWindowTest(unittest.TestCase):
         )  # the ball must stay 1 s
         done = self.sample(13.6, REST_Z, held=False)
         self.assertEqual(self.score(done), (True, 1.0))
+
+    def test_runtime_stops_active_and_overdue_pulses_through_settling_and_success(self):
+        runtime = self.make_runtime()
+        self.runtime_sample(runtime, 1.0, UP_Z)
+        self.runtime_sample(runtime, 10.99, UP_Z)
+        pulses = runtime.debug_state()["perturbation_count"]
+        self.assertGreater(pulses, 0)
+        ball_body = self.model.body("ball_tray_ball").id
+        other_force = np.array([0.1, 0.2, 0.3])
+        self.data.xfrc_applied[ball_body, :3] += other_force
+        runtime.before_step(self.model, self.data)
+        self.assertGreater(
+            np.linalg.norm(self.data.xfrc_applied[ball_body, :3] - other_force), 0.0
+        )
+
+        held = self.runtime_sample(runtime, 11.0, UP_Z)
+        self.assertTrue(held.metrics["hold_complete"][0])
+        self.assertFalse(held.metrics["perturbations_allowed"][0])
+        runtime.before_step(self.model, self.data)
+        np.testing.assert_allclose(self.data.xfrc_applied[ball_body, :3], other_force)
+        self.runtime_sample(runtime, 12.5, LOW_Z)
+        touchdown = self.runtime_sample(runtime, 12.6, REST_Z)
+        self.assertTrue(touchdown.metrics["settling"][0])
+
+        # Runtime callbacks run at 500 Hz; the evaluator publishes a score every 17 ticks.
+        for control_step in range(45):
+            for tick in range(17):
+                runtime.before_step(self.model, self.data)
+                np.testing.assert_allclose(
+                    self.data.xfrc_applied[ball_body, :3], other_force
+                )
+                self.data.time = 12.6 + (control_step * 17 + tick + 1) * 0.002
+                if tick == 16:
+                    result = self.sample(float(self.data.time), REST_Z)
+                    runtime.on_task_evaluation(result)
+                    self.assertTrue(result.metrics["hold_complete"][0])
+                    self.assertFalse(result.metrics["perturbations_allowed"][0])
+                runtime.after_step(self.model, self.data)
+                self.assertEqual(runtime.debug_state()["perturbation_count"], pulses)
+        self.assertEqual(self.score(result), (True, 1.0))
+        self.assertTrue(runtime.debug_state()["complete"])
+
+        self.use_evaluator()
+        runtime.after_reset(
+            self.model, self.data, randomization=SimpleNamespace(seed=0)
+        )
+        reset = self.runtime_sample(runtime, 0.0, REST_Z)
+        self.assertFalse(reset.metrics["hold_complete"][0])
+        self.assertTrue(reset.metrics["perturbations_allowed"][0])
+        self.runtime_sample(runtime, 1.0, UP_Z)
+        self.assertGreater(runtime.debug_state()["perturbation_count"], 0)
+
+    def test_early_placements_stop_perturbations_without_completing_the_hold(self):
+        for gentle in (False, True):
+            with self.subTest(gentle=gentle):
+                self.use_evaluator()
+                runtime = self.make_runtime()
+                self.runtime_sample(runtime, 1.0, UP_Z)
+                self.runtime_sample(runtime, 4.0, UP_Z)
+                self.runtime_sample(runtime, 4.5, LOW_Z, held=gentle)
+                placed = self.runtime_sample(runtime, 4.6, REST_Z, held=gentle)
+                pulses = runtime.debug_state()["perturbation_count"]
+                self.assertFalse(placed.metrics["hold_complete"][0])
+                self.assertFalse(placed.metrics["perturbations_allowed"][0])
+                self.assertEqual(bool(placed.metrics["settling"][0]), gentle)
+                for t in (4.634, 5.0, 5.6, 6.0):
+                    result = self.runtime_sample(runtime, t, REST_Z)
+                    self.assertFalse(result.metrics["perturbations_allowed"][0])
+                    self.assertEqual(
+                        runtime.debug_state()["perturbation_count"], pulses
+                    )
+                self.assertFalse(result.scalar_success())
+
+    def test_contact_loss_and_relift_restart_the_full_settling_interval(self):
+        for gap_z in (LOW_Z, UP_Z):
+            for gap_time in (13.0, 13.6):
+                with self.subTest(gap_z=gap_z, gap_time=gap_time):
+                    self.use_evaluator()
+                    self.hold(1, 12)
+                    self.place(12.6)
+                    for t in (gap_time, 14.0):
+                        interrupted = self.sample(t, gap_z)
+                        self.assertFalse(interrupted.metrics["tray_table_contact"][0])
+                        self.assertFalse(interrupted.scalar_success())
+                        self.assertTrue(interrupted.metrics["hold_complete"][0])
+                        self.assertFalse(
+                            interrupted.metrics["perturbations_allowed"][0]
+                        )
+                    recontact = self.sample(14.1, REST_Z, held=False)
+                    self.assertTrue(recontact.metrics["settling"][0])
+                    self.assertFalse(recontact.scalar_success())
+                    self.assertFalse(
+                        self.sample(15.099, REST_Z, held=False).scalar_success()
+                    )
+                    self.assertEqual(
+                        self.score(self.sample(15.1, REST_Z, held=False)), (True, 1.0)
+                    )
+
+    def test_contact_at_the_lift_threshold_does_not_count_as_settled(self):
+        self.hold(1, 12)
+        self.place(12.6)
+        address = int(self.model.jnt_qposadr[self.model.joint("ball_tray_joint").id])
+        self.data.qpos[address + 3 : address + 7] = [
+            np.cos(np.pi / 8),
+            0,
+            np.sin(np.pi / 8),
+            0,
+        ]
+        relifted = self.sample(13.6, REST_Z + 0.05)
+        self.assertTrue(relifted.metrics["tray_table_contact"][0])
+        self.assertTrue(relifted.metrics["lifted"][0])
+        self.assertFalse(relifted.scalar_success())
+        self.data.qpos[address + 3 : address + 7] = [1, 0, 0, 0]
+        self.assertFalse(self.sample(13.7, REST_Z).scalar_success())
+        self.assertTrue(self.sample(14.7, REST_Z).scalar_success())
+
+    def test_ball_loss_during_a_settling_interruption_still_fails(self):
+        self.hold(1, 12)
+        self.place(12.6)
+        self.sample(13.0, LOW_Z)
+        lost = self.sample(13.1, LOW_Z, ball_inside=False)
+        self.assertTrue(lost.metrics["ball_lost_after_hold"][0])
+        self.assertEqual(self.score(lost), (False, 0.0))
+        self.assertEqual(self.score(self.sample(20.0, REST_Z)), (False, 0.0))
+
+    def test_settling_interruption_is_independent_per_world(self):
+        self.use_evaluator(require_handles_at_touchdown=False)
+        rest = self.data.qpos.copy()
+        self.sample(1.0, UP_Z)
+        up = self.data.qpos.copy()
+        self.evaluator.reset(nworld=2)
+        self.evaluator.evaluate_qpos_batch(np.stack([rest, rest]), time_s=0.0)
+        self.evaluator.evaluate_qpos_batch(np.stack([up, up]), time_s=1.0)
+        self.evaluator.evaluate_qpos_batch(np.stack([up, up]), time_s=12.0)
+        self.evaluator.evaluate_qpos_batch(np.stack([rest, rest]), time_s=12.6)
+        self.evaluator.evaluate_qpos_batch(np.stack([rest, up]), time_s=13.0)
+        first = self.evaluator.evaluate_qpos_batch(np.stack([rest, rest]), time_s=13.6)
+        np.testing.assert_array_equal(first.success, [True, False])
+        np.testing.assert_array_equal(first.metrics["hold_complete"], [True, True])
+        np.testing.assert_array_equal(
+            first.metrics["perturbations_allowed"], [False, False]
+        )
+        both = self.evaluator.evaluate_qpos_batch(np.stack([rest, rest]), time_s=14.6)
+        np.testing.assert_array_equal(both.success, [True, True])
 
     def test_a_placement_within_one_control_step_still_checks_the_handles(self):
         self.hold(1, 12)
