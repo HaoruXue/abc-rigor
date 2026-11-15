@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import mujoco
 import numpy as np
@@ -18,6 +20,7 @@ def _free_adr(model, joint):
 class SweepCarryTest(unittest.TestCase):
     def setUp(self):
         self.env = make_env("sweep", render_cameras=False)
+        self.addCleanup(self.env.close)
         self.env.reset(seed=1)
         self.ev = self.env._task_evaluator
         self.active = [i for i, on in enumerate(self.ev._active_trash_mask[0]) if on]
@@ -28,6 +31,7 @@ class SweepCarryTest(unittest.TestCase):
         self.env.data.qpos[self.adr : self.adr + 3] = xyz
         self.env.data.qvel[:] = 0.0
         mujoco.mj_forward(self.env.model, self.env.data)
+        self.env.advance_physics(1)
         return self.env.evaluate_task()
 
     def finger_point(self):
@@ -65,7 +69,7 @@ class SweepCarryTest(unittest.TestCase):
         # The brush never swept it onto the dustpan, so it earns no staged credit (tests/test_sweep_staged_reward.py).
         self.assertEqual(float(result.reward[0]), 0.0)
 
-    def test_lenient_flag_keeps_position_only_scoring(self):
+    def test_lenient_carry_flag_does_not_latch_a_failure(self):
         lenient = SweepAwayEvaluator(
             model=self.env.model, spec=self.env._task_spec, fail_on_gripper_carry=False
         )
@@ -73,8 +77,43 @@ class SweepCarryTest(unittest.TestCase):
             [f"{self.ev.trash_names[i]}_jnt" for i in self.active]
         )
         self.place(self.finger_point())
+        lenient.after_reset(self.env.model, self.env.data)
         result = lenient.evaluate_model_data(self.env.model, self.env.data)
         self.assertFalse(bool(result.metrics["ever_failed"][0]))
+
+    def test_native_steps_record_transient_carries_without_score_reads(self):
+        for apply_action in (False, True):
+            with self.subTest(apply_action=apply_action):
+                self.env.reset(seed=1)
+                self.ev = self.env._task_evaluator
+                self.assertFalse(self.env.evaluate_task().metrics["ever_failed"][0])
+                tick = 0
+                finger, bin_point = self.finger_point(), self.bin_point()
+
+                def before_step(model, data):
+                    nonlocal tick
+                    data.qpos[self.adr : self.adr + 3] = finger if tick == 0 else bin_point
+                    data.qvel[:] = 0
+                    tick += 1
+
+                self.env._task_runtime = SimpleNamespace(before_step=before_step)
+                with (
+                    patch.object(self.env, "evaluate_task", side_effect=AssertionError("score read during stepping")),
+                    patch.object(self.ev, "_observe_model_data", wraps=self.ev._observe_model_data) as observe,
+                ):
+                    if apply_action:
+                        self.env.apply_action(self.env.get_state(), physics_steps=3)
+                    else:
+                        self.env.advance_physics(3)
+                self.env._task_runtime = None
+                self.assertEqual(observe.call_count, 3)
+                result = self.env.evaluate_task()
+                self.assertTrue(result.metrics["ever_failed"][0])
+                self.assertIn(self.ball, result.metrics["scraps_in_bin"][0])
+                self.assertFalse(result.success[0])
+                self.assertEqual(float(result.reward[0]), 0)
+                for _ in range(3):
+                    self.assertEqual(self.env.evaluate_task().to_info(), result.to_info())
 
 
 class SweepFallbackActiveSetTest(unittest.TestCase):
@@ -85,7 +124,9 @@ class SweepFallbackActiveSetTest(unittest.TestCase):
                 env.reset(seed=seed)
                 expected = env._task_evaluator._active_trash_mask[0]
                 self.assertLess(int(expected.sum()), len(expected))  # some scraps are parked
-                fallback = SweepAwayEvaluator(model=env.model, spec=env._task_spec)
+                fallback = SweepAwayEvaluator(
+                    model=env.model, spec=env._task_spec, staged_reward=False, fail_on_gripper_carry=False
+                )
                 result = fallback.evaluate_qpos_batch(env.data.qpos[None, :])
                 np.testing.assert_array_equal(result.metrics["trash_active_mask"][0], expected)
 
@@ -113,6 +154,7 @@ class SweepCarryContactRuleTest(unittest.TestCase):
             frozenset((model.geom(int(c.geom1)).name, model.geom(int(c.geom2)).name))
             for c in data.contact[: data.ncon]
         }
+        evaluator.after_reset(model, data)
         return evaluator.evaluate_model_data(model, data), contacts
 
     def test_gripper_contact_while_resting_on_the_table_is_not_a_carry(self):

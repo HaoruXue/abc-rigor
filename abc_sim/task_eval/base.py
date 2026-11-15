@@ -75,7 +75,7 @@ class TaskEvalResult:
 
 
 class TaskEvaluator(Protocol):
-    """Task evaluator that can score one or more worlds from qpos."""
+    """Task evaluator with an explicit qpos scoring entry point."""
 
     spec: SimTaskSpec
 
@@ -83,7 +83,7 @@ class TaskEvaluator(Protocol):
         """Reset any per-episode evaluator state."""
 
     def evaluate_qpos_batch(self, qpos_batch: np.ndarray) -> TaskEvalResult:
-        """Evaluate reward/success for a qpos batch of shape ``(B, nq)``."""
+        """Score ``(B, nq)`` states, or reject tasks requiring native history."""
 
 
 @runtime_checkable
