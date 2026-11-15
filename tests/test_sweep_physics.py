@@ -12,9 +12,9 @@ from pathlib import Path
 
 import mujoco
 import numpy as np
-from grasp_fixture import close_and_lift
 
 import abc_sim
+from tests.grasp_fixture import close_and_lift
 
 
 class SweepPhysicsTest(unittest.TestCase):

@@ -12,9 +12,9 @@ import xml.etree.ElementTree as ET
 
 import mujoco
 import numpy as np
-from grasp_fixture import close_and_lift
 
 import abc_sim
+from tests.grasp_fixture import close_and_lift
 
 
 class GripperContactsTest(unittest.TestCase):
@@ -62,18 +62,23 @@ class GripperContactsTest(unittest.TestCase):
             pad_materials = set()
             for offset in (0.017, 0.030, 0.044):
                 with self.subTest(part=body_name, arm=arm, offset=offset):
-                    pad_materials.update(
-                        self._check_lift(
-                            model,
-                            env.data,
-                            body_name,
-                            arm,
-                            offset,
-                            close_seconds,
-                            gravity,
-                            pads,
-                        )
+                    measurements, materials = self._measure_lift(
+                        model,
+                        env.data,
+                        body_name,
+                        arm,
+                        offset,
+                        close_seconds,
+                        gravity,
+                        pads,
                     )
+                    pad_materials.update(materials)
+                    self.assertTrue(measurements["finite"], measurements)
+                    self.assertGreater(measurements["contacts"], 0, measurements)
+                    self.assertLess(measurements["penetration_mm"], 1.5, measurements)
+                    self.assertLess(measurements["retention_error_mm"], 5, measurements)
+                    self.assertGreater(measurements["part_lift_mm"], 70, measurements)
+                    self.assertGreater(measurements["tcp_lift_mm"], 70, measurements)
             # Some offsets engage the fingertip spheres. Each arm must also exercise
             # the pads and use their higher-priority contact material during a lift.
             with self.subTest(part=body_name, arm=arm, check="resolved_material"):
@@ -83,7 +88,7 @@ class GripperContactsTest(unittest.TestCase):
                     np.testing.assert_allclose(solimp, [0.998, 0.998, 0.001, 0.5, 2])
                     np.testing.assert_allclose(friction, [4, 4, 0.1, 0.01, 0.01])
 
-    def _check_lift(
+    def _measure_lift(
         self,
         model: mujoco.MjModel,
         reset_data: mujoco.MjData,
@@ -93,7 +98,7 @@ class GripperContactsTest(unittest.TestCase):
         close_seconds: float,
         gravity: np.ndarray,
         pads: set[int],
-    ) -> set:
+    ) -> tuple[dict, set]:
         model.opt.gravity[:] = 0
         data = mujoco.MjData(model)
         mujoco.mj_copyData(data, model, reset_data)
@@ -157,19 +162,14 @@ class GripperContactsTest(unittest.TestCase):
         part_lift = data.xipos[body, 2] - initial_point[2]
         tcp_lift = site.xpos[2] - start_site[2]
         measurements = {
+            "finite": bool(np.isfinite(data.qpos).all()),
             "contacts": contact_count,
             "penetration_mm": max_penetration * 1000,
             "retention_error_mm": retention_error * 1000,
             "part_lift_mm": part_lift * 1000,
             "tcp_lift_mm": tcp_lift * 1000,
         }
-        self.assertTrue(np.isfinite(data.qpos).all(), measurements)
-        self.assertGreater(contact_count, 0, measurements)
-        self.assertLess(max_penetration, 0.0015, measurements)
-        self.assertLess(retention_error, 0.005, measurements)
-        self.assertGreater(part_lift, 0.070, measurements)
-        self.assertGreater(tcp_lift, 0.070, measurements)
-        return pad_materials
+        return measurements, pad_materials
 
     def test_counting_sphere_survives_gravity_loaded_lift(self) -> None:
         env = self._make_env("count_into_opaque_box", counting_sphere=True)
