@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import copy
+import math
 import os
 import string
+import weakref
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import gymnasium as gym
 import mujoco
@@ -28,6 +30,9 @@ from abc_sim.task_registry import (
 )
 from abc_sim.task_runtime import make_task_runtime
 from abc_sim.task_specs import SimTaskSpec, maybe_get_task_spec
+
+if TYPE_CHECKING:
+    from abc_sim.randomization.core import RandomizationState
 
 # Backwards-compatible aliases for older imports.
 _SCENE_XMLS = dict(SCENE_XMLS)
@@ -100,6 +105,7 @@ class MuJoCoYAMEnv(gym.Env):
         scene_xml: str | Path | None = None,
         max_episode_steps: int | None = None,
         terminate_on_success: bool = False,
+        wrist_fov: float = 58.0,
     ):
         super().__init__()
         self.config = config
@@ -111,6 +117,12 @@ class MuJoCoYAMEnv(gym.Env):
         self._camera_gpu_id = camera_gpu_id
         self._camera_height = camera_height
         self._camera_width = camera_width
+        if not 0 < wrist_fov < 180:
+            raise ValueError("wrist_fov must be between 0 and 180 degrees.")
+        self._wrist_fov = wrist_fov
+        self._wrist_camera_positions: weakref.WeakKeyDictionary[
+            mujoco.MjModel, np.ndarray
+        ] = weakref.WeakKeyDictionary()
         self._physics_dt = physics_dt
         self._control_decimation = control_decimation
         self._scene_xml = Path(scene_xml) if scene_xml else _DEFAULT_SCENE_XML
@@ -122,6 +134,7 @@ class MuJoCoYAMEnv(gym.Env):
         self.terminate_on_success = bool(terminate_on_success)
         self._scene_xml_string: str | None = None  # set directly for in-memory XML
         self._task_request: str | SimTaskSpec = ""
+        self._task_reset_request: dict[str, Any] | None = None
         self._task: str = ""  # set by make_env after construction
         self._task_spec: SimTaskSpec | None = None
         self._task_evaluator = None
@@ -222,6 +235,7 @@ class MuJoCoYAMEnv(gym.Env):
         self.model = model
         self._step_task_eval = None
         self.model.opt.timestep = self._physics_dt
+        self._configure_model_cameras()
         self.data = mujoco.MjData(self.model)
         self._arm_state_initialized = False
         if self._task_runtime is not None:
@@ -248,6 +262,25 @@ class MuJoCoYAMEnv(gym.Env):
 
         self._build_index_maps()
 
+    def _configure_model_cameras(self) -> None:
+        """Apply constructor camera calibration before allocating renderers."""
+        if self._wrist_fov == 58.0:
+            return
+        tan_baseline = math.tan(math.radians(58.0 / 2))
+        tan_new = math.tan(math.radians(self._wrist_fov / 2))
+        clearance_offset = max(0.0, (tan_new - tan_baseline) / tan_baseline) * 0.025
+        positions = self._wrist_camera_positions.get(self.model)
+        if positions is None:
+            positions = self.model.cam_pos.copy()
+            self._wrist_camera_positions[self.model] = positions
+        for name in ("left", "right"):
+            camera_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, name)
+            if camera_id < 0:
+                continue
+            self.model.cam_fovy[camera_id] = self._wrist_fov
+            self.model.cam_pos[camera_id] = positions[camera_id]
+            self.model.cam_pos[camera_id, 1] -= clearance_offset
+
     def reload_from_xml(self, xml_string: str) -> None:
         """Swap out the MuJoCo model in-place from an XML string.
 
@@ -260,11 +293,25 @@ class MuJoCoYAMEnv(gym.Env):
         self.setup_model()
         self._bind_task_evaluator()
 
+    def copy_model(self, model: mujoco.MjModel) -> mujoco.MjModel:
+        """Copy a compiled model, preserving its original camera mounts.
+
+        Environment-owned model caches use this method so later reloads apply
+        constructor calibration relative to the original mounts. Calibration
+        records remain weakly held and expire with their corresponding models.
+        """
+        replacement = copy.deepcopy(model)
+        positions = self._wrist_camera_positions.get(model)
+        if positions is not None:
+            self._wrist_camera_positions[replacement] = positions.copy()
+        return replacement
+
     def reload_from_model(self, model: mujoco.MjModel) -> None:
         """Swap in a copy of an already-compiled MuJoCo model."""
+        replacement = self.copy_model(model)
         self._scene_xml_string = None
         self._close_camera_backend()
-        self._bind_model(copy.deepcopy(model))
+        self._bind_model(replacement)
         self._bind_task_evaluator()
 
     def _bind_task_evaluator(self) -> None:
@@ -346,38 +393,69 @@ class MuJoCoYAMEnv(gym.Env):
         self._validate_physics_observation_cadence()
         self._physics_observer = None
         super().reset(seed=seed)
-        # Each reset starts the arms at init_q; pass options={"keep_arm_state": True} to carry the current pose.
-        if not (options or {}).get("keep_arm_state", False):
-            self.forget_arm_state()
-        reset_arm_state = self._get_reset_arm_state()
-        mujoco.mj_resetData(self.model, self.data)
-        self._set_qpos_from_state(reset_arm_state)
-        mujoco.mj_forward(self.model, self.data)
+        randomization_request = (options or {}).get("randomization")
+        if randomization_request is None:
+            # Task variants such as fixed-count aliases pin part of every reset.
+            randomization_request = getattr(self, "_task_reset_request", None)
+        randomizer = getattr(self, "_task_randomizer", None)
+        if randomizer is None and self._task:
+            randomizer = get_task_randomizer(self._task)
+        if randomizer is not None:
+            prepare_reset = getattr(randomizer, "prepare_reset", None)
+            if prepare_reset is not None:
+                prepare_reset(request=randomization_request, randomize=randomize)
+        self.initialize_randomization(
+            keep_arm_state=(options or {}).get("keep_arm_state", False)
+        )
 
         # _task_randomizer (set by make_env) takes priority over TASK_RANDOMIZERS
         # so that model-swapping tasks (e.g. inhand_transfer) work correctly.
         self._last_randomization = None
-        if randomize:
-            randomization_request = None
-            if options is not None:
-                randomization_request = options.get("randomization")
-            if randomization_request is None:
-                # Task variants such as fixed-count aliases pin part of every reset.
-                randomization_request = getattr(self, "_task_reset_request", None)
-            randomizer = getattr(self, "_task_randomizer", None)
-            if randomizer is None and self._task:
-                randomizer = get_task_randomizer(self._task)
-            if randomizer is not None:
-                self._last_randomization = randomizer.randomize(
-                    self.model,
-                    self.data,
-                    seed=seed,
-                    request=randomization_request,
-                )
-                prompt = getattr(self._last_randomization, "metadata", {}).get("prompt")
-                if prompt is not None:
-                    self.prompt = str(prompt)
+        if randomize and randomizer is not None:
+            self._last_randomization = randomizer.randomize(
+                self.model,
+                self.data,
+                seed=seed,
+                request=randomization_request,
+            )
 
+        self.finalize_randomization(self._last_randomization)
+        info: dict[str, Any] = {}
+        if self._last_randomization is not None:
+            info["randomization"] = self._last_randomization
+        return self.get_obs(), info
+
+    def initialize_randomization(self, *, keep_arm_state: bool = False) -> None:
+        """Reset physics before sampling or restoring an initial object scene.
+
+        Arms start at configured ``init_q`` unless ``keep_arm_state`` explicitly
+        carries their current pose. Object randomization states do not record
+        robot poses. Velocities, controls, time, and other transient MuJoCo state
+        are reset in either case. Validate replay compatibility before calling.
+        """
+        self._validate_physics_observation_cadence()
+        self._physics_observer = None
+        if not keep_arm_state:
+            self.forget_arm_state()
+        arm_state = self._get_reset_arm_state()
+        mujoco.mj_resetData(self.model, self.data)
+        self._set_qpos_from_state(arm_state)
+        mujoco.mj_forward(self.model, self.data)
+
+    def finalize_randomization(self, state: RandomizationState | None) -> None:
+        """Bind a restored initial scene to its episode metadata and evaluator.
+
+        The model and object poses must already be restored. This starts fresh
+        runtime/evaluator history and resets the episode step count; it does not
+        restore the history of a partially completed trajectory.
+        """
+        self._validate_physics_observation_cadence()
+        self._physics_observer = None
+        self._last_randomization = state
+        if state is not None:
+            prompt = state.metadata.get("prompt")
+            if prompt is not None:
+                self.prompt = str(prompt)
         if self._task_runtime is not None:
             self._task_runtime.after_reset(
                 self.model,
@@ -421,10 +499,6 @@ class MuJoCoYAMEnv(gym.Env):
         self._sync_prompt_from_task_runtime()
 
         self.cur_step = 0
-        info: dict[str, Any] = {}
-        if self._last_randomization is not None:
-            info["randomization"] = self._last_randomization
-        return self.get_obs(), info
 
     def step(self, action: np.ndarray, *, render_obs: bool = True):
         """Apply one 14D policy-space action.
