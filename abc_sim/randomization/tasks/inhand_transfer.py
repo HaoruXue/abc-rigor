@@ -26,9 +26,8 @@ from ..core import RandomizationState, SceneRandomizer, _yaw_from_quat
 class InHandTransferRandomizer(SceneRandomizer):
     """Randomizer for inhand_transfer: swaps the entire MuJoCo model on each reset.
 
-    Unlike other randomizers that perturb existing object positions, this one
-    picks a new kitchen tool category/variant and reloads the model from XML so
-    the mesh assets change.  Call ``bind_env(env)`` after construction.
+    Picks a new kitchen tool category/variant and reloads the model from XML so
+    the mesh assets change. Call ``bind_env(env)`` after construction.
     """
 
     perturbations: list = []  # no PerturbRange — we handle placement ourselves
@@ -90,10 +89,10 @@ class InHandTransferRandomizer(SceneRandomizer):
         xml = _inhand_apply_scene_transforms(xml, self._scene_xml_transform_options)
 
         if env is not None:
-            preserved_arm_state = env._get_reset_arm_state()
+            preserved_robot_qpos = env._get_reset_robot_qpos()
             env.reload_from_xml(xml)
             mujoco.mj_resetData(env.model, env.data)
-            env._set_qpos_from_state(preserved_arm_state)
+            env._set_robot_qpos(preserved_robot_qpos)
             jnt_id = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_JOINT, "task_object_joint")
             qadr = env.model.jnt_qposadr[jnt_id]
             w, s = np.cos(yaw / 2), np.sin(yaw / 2)
@@ -111,13 +110,12 @@ class InHandTransferRandomizer(SceneRandomizer):
             metadata={"category": category, "variant": variant_dir.name, "side": side},
         )
 
-    def apply(self, model: Any, data: Any, state: RandomizationState) -> None:
+    def _restore_scene(self, model: Any, data: Any, state: RandomizationState) -> RandomizationState:
         env = self._env_ref
         category = str(state.metadata.get("category", ""))
         variant_name = str(state.metadata.get("variant", ""))
         if env is None or not category or not variant_name:
-            super().apply(model, data, state)
-            return
+            return super()._restore_scene(model, data, state)
 
         variant_dir = _inhand_asset_base(category) / category / variant_name
         pose = state.object_states.get("task_object_joint", {})
@@ -137,10 +135,10 @@ class InHandTransferRandomizer(SceneRandomizer):
         )
         xml = _inhand_apply_scene_transforms(xml, self._scene_xml_transform_options)
 
-        preserved_arm_state = env._get_reset_arm_state()
+        preserved_robot_qpos = env._get_reset_robot_qpos()
         env.reload_from_xml(xml)
         mujoco.mj_resetData(env.model, env.data)
-        env._set_qpos_from_state(preserved_arm_state)
+        env._set_robot_qpos(preserved_robot_qpos)
         jnt_id = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_JOINT, "task_object_joint")
         qadr = env.model.jnt_qposadr[jnt_id]
         env.data.qpos[qadr:qadr + 3] = pos
@@ -149,6 +147,7 @@ class InHandTransferRandomizer(SceneRandomizer):
         env._inhand_category = category
         env._inhand_variant = variant_name
         env._inhand_side = state.metadata.get("side")
+        return state
 
 
 __all__ = ["InHandTransferRandomizer"]

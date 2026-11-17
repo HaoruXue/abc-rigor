@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, is_dataclass
 import re
+from typing import Any
 
 # Every task in this catalogue is assembled from the one bimanual scene family, so the
 # scene name exported alongside an episode is a constant rather than a per-spec field.
@@ -25,6 +27,7 @@ class SimTaskSpec:
     evaluator_name: str | None = None
     evaluator_options: tuple[tuple[str, object], ...] = ()
     reset_request: tuple[tuple[str, object], ...] = ()
+    reset_constraints: tuple[tuple[str, object], ...] = ()
 
     def evaluator_kwargs(self) -> dict[str, object]:
         """Return evaluator options as a plain kwargs dict."""
@@ -32,9 +35,44 @@ class SimTaskSpec:
         return dict(self.evaluator_options)
 
     def reset_request_options(self) -> dict[str, object] | None:
-        """Return the randomization request every reset of this task applies, if any."""
+        """Return task defaults, including fixed randomization constraints."""
 
-        return dict(self.reset_request) or None
+        return {**dict(self.reset_request), **dict(self.reset_constraints)} or None
+
+    def resolve_reset_request(self, request: Any | None) -> Any:
+        """Resolve caller options and reject changes to the task's fixed condition."""
+        if not self.reset_constraints:
+            return self.reset_request_options() if request is None else request
+        if request is None:
+            supplied = {}
+        elif isinstance(request, Mapping):
+            supplied = dict(request)
+        elif is_dataclass(request) and not isinstance(request, type):
+            supplied = asdict(request)
+        else:
+            raise TypeError("Constrained task reset options must be a mapping or dataclass.")
+        resolved = {**dict(self.reset_request), **supplied}
+        for key, required in self.reset_constraints:
+            value = resolved.get(key)
+            if value is not None and (
+                type(value) is not type(required) or value != required
+            ):
+                raise ValueError(
+                    f"Task {self.name!r} requires {key}={required!r}; got {value!r}."
+                )
+            resolved[key] = required
+        return resolved
+
+    def validate_replay_metadata(self, metadata: Mapping[str, Any]) -> None:
+        """Require recordings to identify every fixed reset condition."""
+        values = {}
+        for key, _ in self.reset_constraints:
+            if key not in metadata or metadata[key] is None:
+                raise ValueError(
+                    f"Recording for task {self.name!r} must identify {key!r}."
+                )
+            values[key] = metadata[key]
+        self.resolve_reset_request(values)
 
 
 def _normalize_key(value: str) -> str:
@@ -226,6 +264,14 @@ _TASK_SPECS: tuple[SimTaskSpec, ...] = (
             "sim_multi_drawer_search",
             "sim_find_target_hidden_in_drawer",
         ),
+    ),
+    SimTaskSpec(
+        name="multi_drawer_search_2_shaped",
+        env_task="multi_drawer_search",
+        prompt="find two target objects in the drawers and place them in the bin one at a time",
+        description="Training variant with two ordered targets and episode-unique drawer-opening credit; the caller controls the horizon.",
+        evaluator_name="multi_drawer_search_shaped_v1",
+        reset_constraints=(("target_count", 2),),
     ),
     SimTaskSpec(
         name="put_markers_in_top_drawer",

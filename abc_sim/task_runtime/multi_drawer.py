@@ -2,37 +2,50 @@
 
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 import mujoco
-import numpy as np
+from abc_sim.multi_drawer_episode import DrawerEpisode
+from abc_sim.task_eval.base import TaskEvalResult, TaskEvaluator
+from abc_sim.task_eval.multi_drawer import (
+    DrawerProgressSource,
+    MultiDrawerSearchProgress,
+)
+from abc_sim.task_specs import SimTaskSpec
 
 
 class MultiDrawerSearchRuntime:
     """Advance through prompted objects as they are placed in the goal bin."""
 
     def __init__(self) -> None:
-        self._goal_site_id = -1
-        self._target_body_ids: list[int] = []
         self._targets: list[dict[str, str]] = []
         self._current_index = 0
         self._display_prompt = "find the target object"
         self._state = "waiting_for_target"
+        self._episode_randomization = None
 
     def bind(self, model: mujoco.MjModel, data: mujoco.MjData) -> None:
-        """Refresh model indices after a scene reload."""
+        """The prompt sequence holds no compiled-model indices."""
 
-        self._goal_site_id = int(
-            mujoco.mj_name2id(
-                model,
-                mujoco.mjtObj.mjOBJ_SITE,
-                "drawer_search_goal_region",
+    def make_progress_source(
+        self,
+        model: mujoco.MjModel,
+        spec: SimTaskSpec,
+        evaluator: TaskEvaluator | None,
+    ) -> DrawerProgressSource:
+        """Share compatible scoring or bind native progress for an unscored task."""
+        if evaluator is None:
+            return MultiDrawerSearchProgress(model=model, spec=spec)
+        if not isinstance(evaluator, DrawerProgressSource):
+            raise ValueError(
+                "Multi-drawer runtime requires an evaluator with ordered drawer progress."
             )
-        )
-        self._target_body_ids = [
-            int(mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, target["body"]))
-            for target in self._targets
-        ]
+        return evaluator
+
+    def retained_randomization(self) -> Any:
+        """Return the physical initial scene to restore on nonrandomized reset."""
+        return copy.deepcopy(self._episode_randomization)
 
     def after_reset(
         self,
@@ -40,30 +53,17 @@ class MultiDrawerSearchRuntime:
         data: mujoco.MjData,
         *,
         randomization: Any = None,
+        episode: DrawerEpisode,
     ) -> None:
-        """Load the reset's sampled target sequence."""
+        """Load the shared source's validated initial target sequence."""
 
-        metadata = getattr(randomization, "metadata", {})
-        raw_targets = metadata.get("target_sequence", []) if isinstance(metadata, dict) else []
-        if not raw_targets and isinstance(metadata, dict) and metadata.get("target_body"):
-            raw_targets = [
-                {
-                    "body": metadata["target_body"],
-                    "joint": metadata.get("target_joint", ""),
-                    "label": metadata.get("target_label", "target object"),
-                }
-            ]
         self._targets = [
-            {
-                "body": str(target["body"]),
-                "joint": str(target.get("joint", "")),
-                "label": str(target["label"]),
-            }
-            for target in raw_targets
-            if isinstance(target, dict) and target.get("body") and target.get("label")
+            {"body": target.body, "joint": target.joint, "label": target.label}
+            for target in episode.targets
         ]
+        self._episode_randomization = copy.deepcopy(randomization)
         self._current_index = 0
-        self._state = "waiting_for_target" if self._targets else "finished"
+        self._state = "waiting_for_target"
         self.bind(model, data)
         self._update_prompt()
 
@@ -71,13 +71,15 @@ class MultiDrawerSearchRuntime:
         """No pre-step controls are needed."""
 
     def after_step(self, model: mujoco.MjModel, data: mujoco.MjData) -> None:
-        """Advance every target that has reached the bin."""
+        """The environment has already observed the shared progress source."""
 
-        while self._current_index < len(self._targets):
-            body_id = self._target_body_ids[self._current_index]
-            if body_id < 0 or not self._body_is_in_goal(model, data, body_id):
-                break
-            self._current_index += 1
+    def on_task_evaluation(self, result: TaskEvalResult) -> None:
+        """Use the shared deposit counter as the prompt sequence authority."""
+        if result.num_worlds != 1 or int(result.metrics["target_count"][0]) != len(
+            self._targets
+        ):
+            raise ValueError("Runtime and evaluator target sequences must match.")
+        self._current_index = int(result.metrics["completed_target_count"][0])
         self._state = (
             "finished"
             if self._current_index >= len(self._targets)
@@ -109,26 +111,8 @@ class MultiDrawerSearchRuntime:
             "complete": self._state == "finished",
         }
 
-    def _body_is_in_goal(
-        self,
-        model: mujoco.MjModel,
-        data: mujoco.MjData,
-        body_id: int,
-    ) -> bool:
-        if self._goal_site_id < 0:
-            return False
-        goal_center = np.asarray(data.site_xpos[self._goal_site_id], dtype=np.float64)
-        goal_rotation = np.asarray(
-            data.site_xmat[self._goal_site_id],
-            dtype=np.float64,
-        ).reshape(3, 3)
-        body_pos = np.asarray(data.xpos[body_id], dtype=np.float64)
-        local_pos = goal_rotation.T @ (body_pos - goal_center)
-        half_size = np.asarray(model.site_size[self._goal_site_id], dtype=np.float64)
-        return bool(np.all(np.abs(local_pos) <= half_size))
-
     def _update_prompt(self) -> None:
         if self._current_index >= len(self._targets):
             self._display_prompt = "finished"
             return
-        self._display_prompt = f'find the {self._targets[self._current_index]["label"]}'
+        self._display_prompt = f"find the {self._targets[self._current_index]['label']}"

@@ -143,7 +143,7 @@ class WaterBottleRandomizer(SceneRandomizer):
         self._sample_and_apply_bin_color(model, state, rng)
         return state
 
-    def apply(self, model: Any, data: Any, state: RandomizationState) -> None:
+    def _restore_scene(self, model: Any, data: Any, state: RandomizationState) -> RandomizationState:
         bottle_variants = self._bottle_variants_from_state(state)
         self._set_active_bottle_count(len(bottle_variants))
         self._current_scale_states = dict(state.scale_states)
@@ -154,6 +154,7 @@ class WaterBottleRandomizer(SceneRandomizer):
         self._apply_states(model, data, state.object_states)
         mujoco.mj_forward(model, data)
         self._apply_bin_color(model, state.metadata.get("bin_color"))
+        return state
 
     def _resolve_bottle_variants(
         self,
@@ -347,7 +348,7 @@ class WaterBottleRandomizer(SceneRandomizer):
             return
 
         bottle_variants = [_water_bottle_canonical_variant_name(variant) for variant in bottle_variants]
-        preserved_arm_state = self._env_ref._get_reset_arm_state()
+        preserved_robot_qpos = self._env_ref._get_reset_robot_qpos()
         scene_cache_key = self._scene_model_cache_key(bottle_variants, scale_states)
         if not self._try_reload_cached_scene_model(scene_cache_key):
             base_scene_xml = self._base_scene_xml_string
@@ -379,7 +380,7 @@ class WaterBottleRandomizer(SceneRandomizer):
         self._current_bottle_variants = list(bottle_variants)
         self._current_active_bottle_count = len(bottle_variants)
         mujoco.mj_resetData(self._env_ref.model, self._env_ref.data)
-        self._env_ref._set_qpos_from_state(preserved_arm_state)
+        self._env_ref._set_robot_qpos(preserved_robot_qpos)
         mujoco.mj_forward(self._env_ref.model, self._env_ref.data)
         self._fixed_body_nominals = None
 

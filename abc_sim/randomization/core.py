@@ -7,10 +7,12 @@ import logging
 import xml.etree.ElementTree as _ET
 from dataclasses import dataclass, field
 from pathlib import Path as _Path
-from typing import Any
+from typing import Any, final
 
 import mujoco
 import numpy as np
+
+from abc_sim.physics import PhysicsProfile, apply_physics_profile
 
 logger = logging.getLogger(__name__)
 
@@ -349,6 +351,11 @@ class SceneRandomizer:
     reject_arm_contacts: bool = True
     arm_root_body_names: tuple[str, ...] = ("left_arm", "right_arm")
 
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if "apply" in cls.__dict__:
+            raise TypeError("Replay implementations must override _restore_scene, not apply.")
+
     def __init__(self) -> None:
         # Cache fixed-body nominal positions on first read so that subsequent
         # randomizations don't drift (mj_resetData restores data.qpos but not
@@ -436,8 +443,49 @@ class SceneRandomizer:
 
         self._raise_sampling_failure(seed)
 
-    def apply(self, model: Any, data: Any, state: RandomizationState) -> None:
-        """Restore a previously saved state without sampling (for replay)."""
+    @final
+    def apply(
+        self, model: Any, data: Any, state: RandomizationState, *,
+        keep_arm_state: bool = False,
+    ) -> None:
+        """Validate physics, restore the scene, and start a fresh replay episode.
+
+        Recordings without profile metadata use native physics. A bound
+        environment must already have the recorded profile so its model copies
+        and renderers share the same condition. Task restoration belongs in
+        ``_restore_scene`` and cannot bypass this preflight.
+        """
+        metadata = state.metadata.get("physics_profile")
+        profile = None if metadata is None else PhysicsProfile.from_dict(metadata)
+        if self._env_ref is not None and self._env_ref.physics_profile != profile:
+            raise ValueError(
+                "Replay physics profile differs from the environment. "
+                "Construct the replay environment with the recorded physics_profile."
+            )
+        if self._env_ref is not None and self._env_ref._task_spec is not None:
+            self._env_ref._task_spec.validate_replay_metadata(state.metadata)
+        episode = (
+            self._env_ref.prepare_randomization(state)
+            if self._env_ref is not None else None
+        )
+        self._validate_scene(model, state)
+        apply_physics_profile(model, profile)
+        if self._env_ref is not None:
+            self._env_ref.initialize_randomization(keep_arm_state=keep_arm_state)
+            model, data = self._env_ref.model, self._env_ref.data
+        restored = self._restore_scene(model, data, state)
+        if self._env_ref is not None:
+            self._env_ref.finalize_randomization(
+                restored, restorer=self, episode=episode, keep_arm_state=keep_arm_state
+            )
+
+    def _validate_scene(self, model: Any, state: RandomizationState) -> None:
+        """Validate task-owned restoration fields without changing model or state."""
+
+    def _restore_scene(
+        self, model: Any, data: Any, state: RandomizationState
+    ) -> RandomizationState:
+        """Restore the scene and return its effective episode definition."""
         self._current_scale_states = dict(state.scale_states)
         if state.scale_states:
             self._reload_scene_for_scale_states(state.scale_states)
@@ -446,6 +494,7 @@ class SceneRandomizer:
                 data = self._env_ref.data
         self._apply_states(model, data, state.object_states)
         mujoco.mj_forward(model, data)
+        return state
 
     def _get_size_perturbations(self) -> list[ScalePerturbRange]:
         if self.size_perturbations:
@@ -490,10 +539,10 @@ class SceneRandomizer:
         if xml is None:
             return
 
-        preserved_arm_state = self._env_ref._get_reset_arm_state()
+        preserved_robot_qpos = self._env_ref._get_reset_robot_qpos()
         self._env_ref.reload_from_xml(xml)
         mujoco.mj_resetData(self._env_ref.model, self._env_ref.data)
-        self._env_ref._set_qpos_from_state(preserved_arm_state)
+        self._env_ref._set_robot_qpos(preserved_robot_qpos)
         mujoco.mj_forward(self._env_ref.model, self._env_ref.data)
 
     def _read_nominals(

@@ -104,7 +104,7 @@ class MugVariantRandomizer(SceneRandomizer):
             self._apply_plain_mug_colors(model, mug_colors, mug_variants)
         return state
 
-    def apply(self, model: Any, data: Any, state: RandomizationState) -> None:
+    def _restore_scene(self, model: Any, data: Any, state: RandomizationState) -> RandomizationState:
         mug_variants = self._mug_variants_from_state(state)
         self._set_active_mug_count(len(mug_variants))
         self._current_scale_states = dict(state.scale_states)
@@ -117,6 +117,7 @@ class MugVariantRandomizer(SceneRandomizer):
         if isinstance(raw_colors, dict):
             self._apply_plain_mug_colors(model, raw_colors, mug_variants)
         mujoco.mj_forward(model, data)
+        return state
 
     def _randomize_pose_with_rng(
         self,
@@ -370,7 +371,7 @@ class MugVariantRandomizer(SceneRandomizer):
             return
 
         mug_variants = [_mug_canonical_variant_name(variant) for variant in mug_variants]
-        preserved_arm_state = self._env_ref._get_reset_arm_state()
+        preserved_robot_qpos = self._env_ref._get_reset_robot_qpos()
         scene_cache_key = self._scene_model_cache_key(mug_variants, scale_states)
         if not self._try_reload_cached_scene_model(scene_cache_key):
             base_scene_xml = self._base_scene_xml_string
@@ -399,7 +400,7 @@ class MugVariantRandomizer(SceneRandomizer):
         self._current_mug_variants = list(mug_variants)
         self._current_active_mug_count = len(mug_variants)
         mujoco.mj_resetData(self._env_ref.model, self._env_ref.data)
-        self._env_ref._set_qpos_from_state(preserved_arm_state)
+        self._env_ref._set_robot_qpos(preserved_robot_qpos)
         mujoco.mj_forward(self._env_ref.model, self._env_ref.data)
         self._fixed_body_nominals = None
 
@@ -722,12 +723,13 @@ class MugFlipRandomizer(MugVariantRandomizer):
         self._sample_and_apply_tray_color(model, state, rng)
         return state
 
-    def apply(self, model: Any, data: Any, state: RandomizationState) -> None:
-        super().apply(model, data, state)
+    def _restore_scene(self, model: Any, data: Any, state: RandomizationState) -> RandomizationState:
+        super()._restore_scene(model, data, state)
         target_model = self._env_ref.model if self._env_ref is not None else model
         tray_color = state.metadata.get("tray_color")
         if tray_color is not None:
             self._apply_tray_color(target_model, tray_color)
+        return state
 
     def _sample_and_apply_tray_color(
         self,

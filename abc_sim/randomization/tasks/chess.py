@@ -224,7 +224,7 @@ class ChessRandomizer(SceneRandomizer):
 
         self._raise_sampling_failure(seed)
 
-    def apply(self, model: Any, data: Any, state: RandomizationState) -> None:
+    def _restore_scene(self, model: Any, data: Any, state: RandomizationState) -> RandomizationState:
         self._current_scale_states = dict(state.scale_states)
         raw_tin_variant = state.metadata.get(
             "tin_variant",
@@ -239,6 +239,7 @@ class ChessRandomizer(SceneRandomizer):
         self._set_tin_collision_enabled(model, bool(state.metadata.get("tin_active", False)))
         mujoco.mj_forward(model, data)
         self._remember_selection(state.metadata)
+        return state
 
     def _remember_selection(self, metadata: dict[str, Any]) -> None:
         scenario = metadata.get("scenario")
@@ -503,7 +504,7 @@ class ChessRandomizer(SceneRandomizer):
         if self._env_ref is None:
             return
 
-        preserved_arm_state = self._env_ref._get_reset_arm_state()
+        preserved_robot_qpos = self._env_ref._get_reset_robot_qpos()
         scene_cache_key = self._scene_model_cache_key(tin_variant, scale_states)
         scene_reloaded = False
         if getattr(self, "_current_scene_model_cache_key", None) == scene_cache_key:
@@ -537,7 +538,7 @@ class ChessRandomizer(SceneRandomizer):
 
         if scene_reloaded:
             mujoco.mj_resetData(self._env_ref.model, self._env_ref.data)
-            self._env_ref._set_qpos_from_state(preserved_arm_state)
+            self._env_ref._set_robot_qpos(preserved_robot_qpos)
             mujoco.mj_forward(self._env_ref.model, self._env_ref.data)
             self._fixed_body_nominals = None
 

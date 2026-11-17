@@ -71,7 +71,7 @@ class BlocksRandomizer(SceneRandomizer):
                 "Randomized block appearance requires a bound environment."
             )
         env = self._env_ref
-        arm_state = env._get_reset_arm_state()
+        robot_qpos = env._get_reset_robot_qpos()
         if appearance is None:
             env.reload_from_xml(
                 _resolve_scene_xml_paths(
@@ -86,24 +86,15 @@ class BlocksRandomizer(SceneRandomizer):
                 )
             apply_appearance(self._appearance_model, appearance)
             env.reload_from_model(self._appearance_model)
-        env._set_qpos_from_state(arm_state)
+        env._set_robot_qpos(robot_qpos)
         self._appearance_active = appearance is not None
 
-    def apply(self, model: Any, data: Any, state: RandomizationState) -> None:
-        """Replay an initial object scene with fresh physics and arms at init_q."""
-        if self._env_ref is not None:
-            self._env_ref.initialize_randomization()
-            model, data = self._env_ref.model, self._env_ref.data
-        self._apply_scene(model, data, state)
-        if self._env_ref is not None:
-            self._env_ref.finalize_randomization(state)
-
-    def _apply_scene(self, model: Any, data: Any, state: RandomizationState) -> None:
+    def _restore_scene(self, model: Any, data: Any, state: RandomizationState) -> RandomizationState:
         """Restore the model and poses before episode finalization."""
         self._restore_visuals(state.metadata.get("block_appearance"))
         if self._env_ref is not None:
             model, data = self._env_ref.model, self._env_ref.data
-        super().apply(model, data, state)
+        return super()._restore_scene(model, data, state)
 
     def randomize(
         self,
@@ -143,7 +134,7 @@ class BlocksRandomizer(SceneRandomizer):
         if appearance is not None:
             state.metadata["block_appearance"] = appearance
         if appearance is not None or self._appearance_active:
-            self._apply_scene(model, data, state)
+            self._restore_scene(model, data, state)
         return state
 
 

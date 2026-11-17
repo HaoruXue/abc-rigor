@@ -87,6 +87,28 @@ class TaskEvaluator(Protocol):
 
 
 @runtime_checkable
+class EpisodeTaskEvaluator(TaskEvaluator, Protocol):
+    """Prepare and consume one task-owned episode definition.
+
+    Preparation is read-only and runs before reset/replay changes data or
+    episode history. A ``None`` state requests the compiled initial episode,
+    which may be rejected when the task requires sampled/recorded metadata.
+    The environment passes its opaque result to both
+    ``configure_episode`` and the runtime's ``after_reset(..., episode=...)``.
+    A runtime can use this source for progress without exposing reward scores.
+    """
+
+    def validate_model(self, model: Any) -> None:
+        """Check model assumptions before binding or replacing the live scene."""
+
+    def prepare_randomization(self, model: Any, state: Any | None) -> Any:
+        """Validate a recording or compiled initial state and return its definition."""
+
+    def configure_episode(self, model: Any, episode: Any) -> None:
+        """Bind the validated definition after restoring the initial scene."""
+
+
+@runtime_checkable
 class PhysicsObservedTaskEvaluator(TaskEvaluator, Protocol):
     """Opt-in single-world evaluation using every solved native physics step."""
 

@@ -8,6 +8,9 @@ from typing import Any
 import mujoco
 import numpy as np
 
+from abc_sim.multi_drawer_episode import DrawerEpisode
+from abc_sim.task_eval.multi_drawer import DrawerProgressSource, resolve_drawer_goal
+
 from ..assets.inhand import _inhand_parse_model_xml
 from ..assets.paths import _MODELS_DIR
 from ..assets.xml_common import _find_xml_body_parent
@@ -20,6 +23,7 @@ from ..core import (
     _resolve_scene_xml_paths,
     _scaled_mesh_attr,
 )
+from ..requests import MultiDrawerSearchResetRequest
 from .count_box import _COUNT_BOX_ARM_QPOS, _count_box_apply_scene_transforms
 from .grab_clutter import _grab_clutter_scaled_float_attr
 
@@ -705,17 +709,45 @@ class MultiDrawerSearchRandomizer(SceneRandomizer):
 
     perturbations: list = []
 
-    def __init__(self) -> None:
-        super().__init__()
-        self._full_scene_loaded = False
+    def bind_env(self, env: Any) -> None:
+        """Require the bound task's ordered drawer progress and scene contract."""
+        if not isinstance(env._step_evaluator, DrawerProgressSource):
+            raise ValueError("Drawer randomization requires an ordered drawer progress source.")
+        env._step_evaluator.validate_model(env.model)
+        super().bind_env(env)
 
     def prepare_env(self) -> None:
         if self._env_ref is not None:
             self._ensure_full_scene_loaded()
 
+    def prepare_reset(
+        self, *, request: Any | None = None, randomize: bool = True
+    ) -> None:
+        """Validate the request and prepare the bound scene before reset."""
+        MultiDrawerSearchResetRequest.from_value(request)
+        if randomize:
+            self._ensure_full_scene_loaded()
+
     def _ensure_full_scene_loaded(self) -> None:
-        if self._env_ref is None or self._full_scene_loaded:
+        if self._env_ref is None:
             return
+        model = self._env_ref.model
+        template_id = mujoco.mj_name2id(
+            model, mujoco.mjtObj.mjOBJ_BODY, _MULTI_DRAWER_SEARCH_TEMPLATE_DRAWER_BODY
+        )
+        if template_id < 0:
+            self._validate_full_scene(model)
+            return
+        if any(
+            mujoco.mj_name2id(
+                model, mujoco.mjtObj.mjOBJ_BODY,
+                _multi_drawer_search_stack_body_name(stack_id),
+            ) >= 0
+            for stack_id in _MULTI_DRAWER_SEARCH_STACK_IDS
+        ):
+            raise ValueError("Drawer scene mixes template and assembled stacks.")
+        self._validate_stack(model, _MULTI_DRAWER_SEARCH_TEMPLATE_DRAWER_BODY, "")
+        self._validate_goal(model)
 
         base_text = (
             self._base_scene_xml_string
@@ -738,17 +770,75 @@ class MultiDrawerSearchRandomizer(SceneRandomizer):
                 self._scene_xml_transform_options,
             )
 
-        preserved_arm_state = self._env_ref._get_reset_arm_state()
-        self._env_ref.reload_from_xml(xml)
+        preserved_robot_qpos = self._env_ref._get_reset_robot_qpos()
+        self._env_ref.reload_from_xml(xml, validate_model=self._validate_full_scene)
         mujoco.mj_resetData(self._env_ref.model, self._env_ref.data)
-        self._env_ref._set_qpos_from_state(preserved_arm_state)
+        self._env_ref._set_robot_qpos(preserved_robot_qpos)
         mujoco.mj_forward(self._env_ref.model, self._env_ref.data)
         self._base_scene_xml_string = xml
         self._base_scene_xml_dir = base_dir
         self._base_scene_xml_transformed = True
-        self._full_scene_loaded = True
 
-    def _sample_selections(self, rng: np.random.Generator) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    def _validate_stack(self, model: Any, stack: str, prefix: str) -> None:
+        """Require native drawer ownership and the selected progress contract."""
+        stack_body = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, stack)
+        if stack_body < 0:
+            raise ValueError(f"Drawer stack {stack!r} is missing from the model.")
+        joints = []
+        for level in _MULTI_DRAWER_SEARCH_DRAWER_LEVELS:
+            body = f"{prefix}link_{level}_drawer_low"
+            body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body)
+            joint = f"{prefix}joint_{level}_drawer_low"
+            joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, joint)
+            if (
+                body_id < 0 or joint_id < 0
+                or model.body_parentid[body_id] != stack_body
+                or model.jnt_bodyid[joint_id] != body_id
+                or model.jnt_type[joint_id] != mujoco.mjtJoint.mjJNT_SLIDE
+            ):
+                raise ValueError(f"Drawer {body!r} requires its own slide joint.")
+            joints.append(joint)
+        if self._env_ref is not None:
+            self._env_ref._step_evaluator.validate_drawer_joints(model, joints)
+
+    def _validate_full_scene(self, model: Any) -> None:
+        """Require the complete assembled drawer inventory and joint ownership."""
+        if mujoco.mj_name2id(
+            model, mujoco.mjtObj.mjOBJ_BODY, _MULTI_DRAWER_SEARCH_TEMPLATE_DRAWER_BODY
+        ) >= 0:
+            raise ValueError("An assembled drawer scene must not retain the template stack.")
+        for stack_id in _MULTI_DRAWER_SEARCH_STACK_IDS:
+            stack = _multi_drawer_search_stack_body_name(stack_id)
+            self._validate_stack(model, stack, f"{stack}_")
+        for body, joint in _MULTI_DRAWER_SEARCH_JOINT_BY_BODY.items():
+            body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body)
+            joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, joint)
+            if (
+                body_id < 0 or joint_id < 0
+                or model.jnt_type[joint_id] != mujoco.mjtJoint.mjJNT_FREE
+                or model.jnt_bodyid[joint_id] != body_id
+            ):
+                raise ValueError(f"Drawer object {body!r} requires its own free joint.")
+        self._validate_goal(model)
+
+    def _validate_goal(self, model: Any) -> None:
+        """Require the goal bin's free joint and attached region in either layout."""
+        goal_joint, _ = resolve_drawer_goal(
+            model,
+            goal_bin_joint_name=_MULTI_DRAWER_SEARCH_GOAL_BIN_JOINT,
+            goal_site_name="drawer_search_goal_region",
+        )
+        goal_body = mujoco.mj_name2id(
+            model, mujoco.mjtObj.mjOBJ_BODY, "drawer_search_goal_bin"
+        )
+        if goal_body < 0 or model.jnt_bodyid[goal_joint] != goal_body:
+            raise ValueError("The drawer goal bin requires its own free joint.")
+        if self._env_ref is not None:
+            self._env_ref._step_evaluator.validate_model(model)
+
+    def _sample_selections(
+        self, rng: np.random.Generator, *, target_count: int | None = None
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         count_min, count_max = _MULTI_DRAWER_SEARCH_STACK_COUNT_RANGE
         stack_count = int(rng.integers(count_min, count_max + 1))
         sampled_stack_ids = {
@@ -782,6 +872,10 @@ class MultiDrawerSearchRandomizer(SceneRandomizer):
             _MULTI_DRAWER_SEARCH_OBJECT_COUNT,
         )
         object_count_min = min(object_count_min, object_count_max)
+        if target_count is not None:
+            object_count_min = max(object_count_min, target_count)
+            if object_count_min > object_count_max:
+                raise ValueError("Requested target count exceeds drawer capacity.")
         active_object_count = int(rng.integers(object_count_min, object_count_max + 1))
 
         object_set = str(rng.choice(_MULTI_DRAWER_SEARCH_OBJECT_SET_NAMES))
@@ -826,7 +920,10 @@ class MultiDrawerSearchRandomizer(SceneRandomizer):
             _MULTI_DRAWER_SEARCH_TARGET_COUNT_RANGE[1],
             len(selections),
         )
-        target_count = int(rng.integers(target_count_min, target_count_max + 1))
+        if target_count is None:
+            target_count = int(rng.integers(target_count_min, target_count_max + 1))
+        elif target_count > len(selections):
+            raise ValueError("Requested target count exceeds available drawer objects.")
         target_indices = rng.choice(
             np.arange(len(selections), dtype=np.int64),
             size=target_count,
@@ -891,12 +988,15 @@ class MultiDrawerSearchRandomizer(SceneRandomizer):
         seed: int | None = None,
         request: Any | None = None,
     ) -> RandomizationState:
+        reset_request = MultiDrawerSearchResetRequest.from_value(request)
         self._ensure_full_scene_loaded()
         if self._env_ref is not None:
             model = self._env_ref.model
             data = self._env_ref.data
         rng = np.random.default_rng(seed)
-        selections, target = self._sample_selections(rng)
+        selections, target = self._sample_selections(
+            rng, target_count=reset_request.target_count
+        )
         goal_bin_side = "left" if int(rng.integers(0, 2)) == 0 else "right"
         goal_bin_pose = {
             "pos": [
@@ -914,8 +1014,6 @@ class MultiDrawerSearchRandomizer(SceneRandomizer):
 
         target_sequence = [dict(item) for item in target["target_sequence"]]
         prompt = f'find the {target["label"]}'
-        _multi_drawer_search_apply_stack_poses(model, stack_poses)
-
         object_states = {
             _MULTI_DRAWER_SEARCH_GOAL_BIN_JOINT: {
                 "pos": list(goal_bin_pose["pos"]),
@@ -949,17 +1047,9 @@ class MultiDrawerSearchRandomizer(SceneRandomizer):
             )
         for object_index, body_name in enumerate(_MULTI_DRAWER_SEARCH_OBJECT_BODIES):
             if body_name in active_body_names:
-                _multi_drawer_search_set_object_collision_enabled(model, body_name, True)
                 continue
             joint = _MULTI_DRAWER_SEARCH_JOINT_BY_BODY[body_name]
             object_states[joint] = _multi_drawer_search_hidden_pose(object_index)
-            _multi_drawer_search_set_object_collision_enabled(model, body_name, False)
-
-        self._apply_states(model, data, object_states)
-        mujoco.mj_forward(model, data)
-        if self._env_ref is not None:
-            self._env_ref.prompt = prompt
-
         metadata = {
             "prompt": prompt,
             "prompt_type": "multi_drawer_search",
@@ -1025,8 +1115,84 @@ class MultiDrawerSearchRandomizer(SceneRandomizer):
             ],
             "objects": objects,
         }
-        return RandomizationState(
+        state = RandomizationState(
             seed=seed or 0,
             object_states=object_states,
             metadata=metadata,
         )
+        return self._restore_scene(model, data, state)
+
+    def _scene_parameters(
+        self, model: Any, state: RandomizationState
+    ) -> tuple[dict[int, dict[str, list[float]]], set[str]]:
+        """Validate the complete recorded layout without changing simulator state."""
+        self._validate_full_scene(model)
+        if state.scale_states:
+            raise ValueError("Drawer scene replay does not support object scale overrides.")
+        episode = DrawerEpisode.from_metadata(state.metadata)
+        raw_poses = state.metadata["stack_poses"]
+        if any(
+            type(key) not in (int, str) or str(int(key)) != str(key)
+            for key in raw_poses
+        ):
+            raise ValueError("Stack identifiers must be integers or their serialized names.")
+        poses = {int(key): value for key, value in raw_poses.items()}
+        stack_ids = state.metadata["active_stack_ids"]
+        if (
+            any(type(key) is not int for key in stack_ids)
+            or len(set(stack_ids)) != len(stack_ids)
+            or len(poses) != len(raw_poses)
+            or set(poses) != set(stack_ids)
+            or not set(stack_ids) <= set(_MULTI_DRAWER_SEARCH_STACK_IDS)
+            or not stack_ids
+        ):
+            raise ValueError("Recorded stack poses must identify the active stacks once.")
+        expected_drawers = tuple(
+            _multi_drawer_search_drawer_name(stack_id, level)
+            for stack_id in stack_ids for level in _MULTI_DRAWER_SEARCH_DRAWER_LEVELS
+        )
+        if episode.drawers != expected_drawers or episode.drawer_joints != tuple(
+            _MULTI_DRAWER_SEARCH_DRAWER_JOINT_BY_DRAWER[name] for name in expected_drawers
+        ):
+            raise ValueError("Recorded active drawers must match their stacks and joints.")
+        objects = state.metadata["objects"]
+        active = {item["body"] for item in objects}
+        if len(active) != len(objects) or not active <= set(_MULTI_DRAWER_SEARCH_OBJECT_BODIES):
+            raise ValueError("Recorded active drawer objects must be unique known bodies.")
+        by_body = {item["body"]: item for item in objects}
+        for item in objects:
+            if (
+                item["joint"] != _MULTI_DRAWER_SEARCH_JOINT_BY_BODY[item["body"]]
+                or item["drawer"] not in expected_drawers
+            ):
+                raise ValueError("An active object's joint or source drawer is inconsistent.")
+        for target in episode.targets:
+            if target.body not in active or any(
+                by_body[target.body][key] != getattr(target, key)
+                for key in ("joint", "drawer", "label")
+            ):
+                raise ValueError("Targets must match the recorded active object selection.")
+        expected_joints = {*_MULTI_DRAWER_SEARCH_OBJECT_JOINTS, _MULTI_DRAWER_SEARCH_GOAL_BIN_JOINT}
+        if set(state.object_states) != expected_joints:
+            raise ValueError("Drawer replay must record every object and the goal-bin pose.")
+        for pose in (*poses.values(), *state.object_states.values()):
+            pos, quat = np.asarray(pose["pos"]), np.asarray(pose["quat"])
+            if (
+                pos.shape != (3,) or quat.shape != (4,)
+                or not np.isfinite(pos).all() or not np.isfinite(quat).all()
+                or np.linalg.norm(quat) == 0
+            ):
+                raise ValueError("Recorded drawer poses must be finite positions and quaternions.")
+        return poses, active
+
+    def _validate_scene(self, model: Any, state: RandomizationState) -> None:
+        self._scene_parameters(model, state)
+
+    def _restore_scene(
+        self, model: Any, data: Any, state: RandomizationState
+    ) -> RandomizationState:
+        poses, active = self._scene_parameters(model, state)
+        _multi_drawer_search_apply_stack_poses(model, poses)
+        for body in _MULTI_DRAWER_SEARCH_OBJECT_BODIES:
+            _multi_drawer_search_set_object_collision_enabled(model, body, body in active)
+        return super()._restore_scene(model, data, state)
