@@ -28,6 +28,7 @@ from abc_minimal.eval_policy import (
     video_frame,
     without_missing_counts,
 )
+from abc_minimal.termination import batched_rollout_over as over
 from abc_sim.batched_env import BatchedWarpYAMEnv
 from abc_sim.task_eval import TaskEvalResult
 
@@ -67,14 +68,6 @@ def rewards(result: TaskEvalResult | None, num_worlds: int) -> np.ndarray:
     if result is None:
         return np.zeros(num_worlds, dtype=np.float32)
     return result.reward
-
-
-def over(result: TaskEvalResult | None, num_worlds: int) -> np.ndarray:
-    """Per-world rollout_over: ever_failed for maintenance tasks, else ever_success."""
-    if result is None:
-        return np.zeros(num_worlds, dtype=bool)
-    flags = result.metrics.get("ever_failed", result.metrics.get("ever_success"))
-    return np.asarray(flags, dtype=bool)
 
 
 def counts(result: TaskEvalResult | None, key: str, index: int) -> int | None:

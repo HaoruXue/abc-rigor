@@ -1,6 +1,10 @@
 """Task evaluation helpers for automatic reward/success scoring."""
 
-from abc_sim.task_eval.base import TaskEvalResult, TaskEvaluator
+from abc_sim.task_eval.base import (
+    PhysicsObservedTaskEvaluator,
+    TaskEvalResult,
+    TaskEvaluator,
+)
 from abc_sim.task_eval.ball_tray import BallTrayBalancingEvaluator
 from abc_sim.task_eval.bottles import BottlesInBinEvaluator, PutBottlesInBinEvaluator
 from abc_sim.task_eval.chess import ChessBoardSetupEvaluator
@@ -17,12 +21,14 @@ from abc_sim.task_eval.nuts_bolts import NutsBoltsSortingEvaluator
 from abc_sim.task_eval.pour import PourBeadsInContainerEvaluator
 from abc_sim.task_eval.put_relative import PutRelativeEvaluator
 from abc_sim.task_eval.spell import SpellWordEvaluator
+from abc_sim.task_eval.spelling_placement import FreePlacementSpellingEvaluator
 from abc_sim.task_eval.sweep import SweepAwayEvaluator
 from abc_sim.task_eval.registry import make_task_evaluator
 
 __all__ = [
     "TaskEvalResult",
     "TaskEvaluator",
+    "PhysicsObservedTaskEvaluator",
     "BottlesInBinEvaluator",
     "PutBottlesInBinEvaluator",
     "ChessBoardSetupEvaluator",
@@ -41,5 +47,6 @@ __all__ = [
     "PourBeadsInContainerEvaluator",
     "PutRelativeEvaluator",
     "SpellWordEvaluator",
+    "FreePlacementSpellingEvaluator",
     "make_task_evaluator",
 ]

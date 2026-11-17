@@ -135,6 +135,8 @@ class BallTrayBalancingRuntime:
             if window is not None and np.all(np.isfinite(window[0]))
             else None
         )
+        if not bool(result.metrics["perturbations_allowed"][0]):
+            self._active_perturbation_until_s = None
         self._update_display()
 
     def observation_prompt(self) -> str:
@@ -273,8 +275,8 @@ class BallTrayBalancingRuntime:
             or self._tray_center_site_id is None
         ):
             return
-        if self._balance_result is not None and bool(
-            self._balance_result.metrics["hold_complete"][0]
+        if self._balance_result is not None and not bool(
+            self._balance_result.metrics["perturbations_allowed"][0]
         ):
             self._active_perturbation_until_s = None
             return

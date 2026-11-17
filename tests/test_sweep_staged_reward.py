@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import unittest
+from itertools import permutations
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import mujoco
 import numpy as np
@@ -63,12 +66,16 @@ class SweepStagedRewardTest(unittest.TestCase):
     def use_evaluator(self, **options):
         self.evaluator = SweepAwayEvaluator(model=self.model, spec=None, **options)
         self.evaluator.set_active_trash_joints(["trash_1_jnt", "trash_2_jnt"])
+        mujoco.mj_forward(self.model, self.data)
+        self.evaluator.after_reset(self.model, self.data)
 
     def state(self, **poses):
         for joint, xyz in {**AWAY, **poses}.items():
             address = int(self.model.jnt_qposadr[self.model.joint(joint).id])
             self.data.qpos[address : address + 3] = xyz
-        mujoco.mj_forward(self.model, self.data)
+        self.data.qvel[:] = 0
+        mujoco.mj_step(self.model, self.data)
+        self.evaluator.after_physics_step(self.model, self.data)
         return self.evaluator.evaluate_model_data(self.model, self.data)
 
     @staticmethod
@@ -132,13 +139,81 @@ class SweepStagedRewardTest(unittest.TestCase):
         self.assertEqual(int(result.metrics["num_scraps_in_bin"][0]), 2)
         self.assertEqual(self.score(result), (False, 0.4))
 
-    def test_without_contacts_or_with_the_flag_off_the_reward_is_the_bin_fraction(self):
+    def test_qpos_scoring_requires_explicit_geometric_configuration(self):
+        for options in ({}, {"staged_reward": False}, {"fail_on_gripper_carry": False}):
+            with self.subTest(options=options):
+                self.use_evaluator(**options)
+                before = self.state(trash_1_jnt=BIN_POINT).to_info()
+                with self.assertRaisesRegex(NotImplementedError, "contact history"):
+                    self.evaluator.evaluate_qpos_batch(self.data.qpos[None, :])
+                self.assertEqual(self.evaluator.evaluate_model_data(self.model, self.data).to_info(), before)
+                self.assertFalse(self.evaluator._ever_success.any())
+        self.use_evaluator(staged_reward=False, fail_on_gripper_carry=False)
         self.state(trash_1_jnt=BIN_POINT)
-        qpos_only = self.evaluator.evaluate_qpos_batch(self.data.qpos[None, :])
+        qpos_only = self.evaluator.evaluate_qpos_batch(np.repeat(self.data.qpos[None, :], 2, axis=0))
         self.assertFalse(qpos_only.metrics["staged_reward"])
-        self.assertEqual(self.score(qpos_only), (False, 0.5))
+        np.testing.assert_array_equal(qpos_only.reward, [0.5, 0.5])
+        np.testing.assert_array_equal(qpos_only.success, [False, False])
+
+    def test_native_nonstaged_reward_keeps_contact_carry_detection(self):
         self.use_evaluator(staged_reward=False)
         self.assertEqual(self.score(self.state(trash_1_jnt=BIN_POINT, trash_2_jnt=BIN_POINT)), (True, 1.0))
+
+    def test_batched_constructor_rejects_contact_history_before_backend_creation(self):
+        from abc_sim.batched_env import BatchedWarpYAMEnv
+        from abc_sim.task_eval.base import PhysicsObservedTaskEvaluator
+
+        self.assertIsInstance(self.evaluator, PhysicsObservedTaskEvaluator)
+        base = SimpleNamespace(_task_evaluator=self.evaluator)
+        with (
+            patch("abc_sim.batched_env.WarpReplayRuntime") as runtime,
+            patch("abc_sim.batched_env.RendererWrapper") as renderer,
+            self.assertRaisesRegex(NotImplementedError, "per-step solved contact"),
+        ):
+            BatchedWarpYAMEnv(base, num_worlds=2, camera_height=16, camera_width=16)
+        runtime.assert_not_called()
+        renderer.assert_not_called()
+
+    def test_four_scrap_contact_chains_resolve_before_arrival_in_every_order(self):
+        extra = "".join(
+            f'<body name="trash_{i}" pos="-1 {i} .01"><freejoint name="trash_{i}_jnt"/>'
+            '<geom type="sphere" size=".01" mass=".01"/></body>'
+            for i in (3, 4)
+        )
+        self.model = mujoco.MjModel.from_xml_string(XML.replace("</worldbody>", extra + "</worldbody>"))
+        joints = [f"trash_{i}_jnt" for i in range(1, 5)]
+        chain = [on_pan(-0.03 + index * 0.019) for index in range(4)]
+        for order in permutations(joints):
+            for gripped in (False, True):
+                with self.subTest(order=order, gripped=gripped):
+                    self.data = mujoco.MjData(self.model)
+                    self.use_evaluator()
+                    self.evaluator.set_active_trash_joints(joints)
+                    poses = dict(zip(order, chain))
+                    poses["brush_jnt"] = brushing(chain[0])
+                    if gripped:
+                        poses["left_finger_jnt"] = np.add(chain[-1], [0.014, 0, 0])
+                    result = self.state(**poses)
+                    expected = 0 if gripped else 4
+                    self.assertEqual(int(result.metrics["num_brushed_scraps_on_dustpan"][0]), expected)
+                    self.assertFalse(result.metrics["ever_failed"][0])
+                    baseline = result.to_info()
+                    actors = self.evaluator._last_actor.copy()
+                    for _ in range(3):
+                        read = self.evaluator.evaluate_model_data(self.model, self.data)
+                        self.assertEqual(read.to_info(), baseline)
+                        np.testing.assert_array_equal(self.evaluator._last_actor, actors)
+                    result.reward[:] = -1
+                    result.metrics["tools_grasped"][:] = True
+                    self.assertEqual(self.evaluator.evaluate_model_data(self.model, self.data).to_info(), baseline)
+
+    def test_contact_observer_rejects_duplicate_or_skipped_ticks(self):
+        with self.assertRaisesRegex(ValueError, "every native physics step"):
+            self.evaluator.after_physics_step(self.model, self.data)
+        mujoco.mj_step(self.model, self.data)
+        mujoco.mj_step(self.model, self.data)
+        with self.assertRaisesRegex(ValueError, "every native physics step"):
+            self.evaluator.after_physics_step(self.model, self.data)
 
 
 if __name__ == "__main__":

@@ -85,6 +85,29 @@ class StepUpdatesTest(unittest.TestCase):
         self.assertEqual(refresh.call_count, 3)
         self.assertEqual(env._task_evaluator.evaluate_model_data.call_count, 3)
 
+    def test_native_observation_precedes_temporal_scoring_without_changing_cadence(
+        self,
+    ):
+        env = self.make_env(requires_updates=True, control_rate=True)
+        observed = []
+        scored = []
+
+        def observe(model, data):
+            observed.append(float(data.time))
+
+        def evaluate(model, data):
+            # A score reads the observer's current integrated tick.
+            self.assertEqual(observed[-1], float(data.time))
+            scored.append(len(observed))
+            return SimpleNamespace()
+
+        env._physics_observer = observe
+        env._task_evaluator.evaluate_model_data.side_effect = evaluate
+        env.advance_physics(36)
+        self.assertEqual(len(observed), 36)
+        self.assertEqual(scored, [17, 34, 36])
+        self.assertEqual(env._task_runtime.on_task_evaluation.call_count, 3)
+
     def test_rebinding_clears_the_previous_tasks_update_requirements(self):
         env = self.make_env(requires_updates=True, control_rate=True)
         with mock.patch("abc_sim.env.make_task_evaluator", return_value=None):

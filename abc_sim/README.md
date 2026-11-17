@@ -150,7 +150,14 @@ randomization = info["randomization"]
 eval sets. Passing `randomize=False` resets the scene without sampling a new
 world.
 
+Custom `SimTaskSpec` objects can also be passed directly to `make_env`. See
+[optional seeded spelling goals](../docs/seeded-spelling.md) for a configuration
+that samples two, three, or four distinct letters without adding catalogue tasks.
+
 ## Rewards and Success
+
+Custom tasks can opt into [conservative free-placement spelling](../docs/free-placement-spelling.md),
+which uses native contacts and credits only unambiguous letter positions.
 
 Task evaluators live under `abc_sim/task_eval/`. If a task has an evaluator,
 `env.step(...)` and `env.step_chunk(...)` return task metrics in `info`:
@@ -228,6 +235,9 @@ every world, e.g. `'{"bottle_count": 6, "randomize_variants": false,
 "randomize_scales": false}'` (fields: `abc_sim/randomization/requests.py`).
 For `conveyor_pick`, `'{"belt_speed_min_m_s": 0.05, "belt_speed_max_m_s": 0.30}'`
 changes the belt speed bounds (default 0.10–0.20 m/s; either bound alone works).
+Sorting accepts `nut_count` and/or `bolt_count` (1–20 each), or
+`blocks_per_color` (1–9). Omitted counts retain the existing sampled ranges.
+Sorting evaluation reports each world's scoring denominator as `active_object_count`.
 - `--diffusion-steps N` — flow-matching Euler steps per inference
 (default 10, matches production).
 - `--checkpoint` — path to the `.pt` checkpoint to evaluate.

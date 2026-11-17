@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields as _fields
 from typing import Any
+
+_NUTS_BOLTS_MAX_OBJECTS_PER_TYPE = 20
+_LEGO_MAX_BLOCKS_PER_COLOR = 9
 
 
 @dataclass(frozen=True)
@@ -309,6 +312,62 @@ class ConveyorPickResetRequest:
             belt_speed_min_m_s=_optional_float("belt_speed_min_m_s"),
             belt_speed_max_m_s=_optional_float("belt_speed_max_m_s"),
         )
+
+
+@dataclass(frozen=True)
+class SortingResetRequest:
+    """Scene-style controls shared by the variable-count sorting randomizers."""
+
+    bin_visual_style: str | None = None
+    park_inactive: bool = False
+    randomize_scales: bool = True
+
+    @classmethod
+    def from_value(cls, value: Any | None) -> "SortingResetRequest":
+        if value is None:
+            return cls()
+        if isinstance(value, cls):
+            return value
+        if not isinstance(value, dict):
+            raise TypeError(f"Sorting reset request must be a dict or {cls.__name__}.")
+        unknown = set(value) - {field.name for field in _fields(cls)}
+        if unknown:
+            raise ValueError(f"Unknown {cls.__name__} fields: {sorted(unknown)}")
+        return cls(**value)
+
+
+@dataclass(frozen=True)
+class NutsBoltsResetRequest(SortingResetRequest):
+    """Optional exact active counts, bounded by the existing physical objects."""
+
+    nut_count: int | None = None
+    bolt_count: int | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("nut_count", "bolt_count"):
+            value = getattr(self, name)
+            if value is not None and (
+                type(value) is not int or not 1 <= value <= _NUTS_BOLTS_MAX_OBJECTS_PER_TYPE
+            ):
+                raise ValueError(
+                    f"{name} must be an integer between 1 and {_NUTS_BOLTS_MAX_OBJECTS_PER_TYPE}."
+                )
+
+
+@dataclass(frozen=True)
+class LegoBlocksResetRequest(SortingResetRequest):
+    """Optional exact active count in each of the three existing LEGO colors."""
+
+    blocks_per_color: int | None = None
+
+    def __post_init__(self) -> None:
+        value = self.blocks_per_color
+        if value is not None and (
+            type(value) is not int or not 1 <= value <= _LEGO_MAX_BLOCKS_PER_COLOR
+        ):
+            raise ValueError(
+                f"blocks_per_color must be an integer between 1 and {_LEGO_MAX_BLOCKS_PER_COLOR}."
+            )
 
 
 class _SweepPlacementFailure(RuntimeError):

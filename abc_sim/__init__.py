@@ -9,6 +9,7 @@ __version__ = "0.1.0"
 
 if TYPE_CHECKING:
     from abc_sim.env import MuJoCoYAMEnv
+    from abc_sim.task_specs import SimTaskSpec
 
 
 def __getattr__(name: str):
@@ -123,7 +124,7 @@ def __getattr__(name: str):
 
 
 def make_env(
-    task: str = "bottles",
+    task: str | SimTaskSpec = "bottles",
     render_cameras: bool = True,
     camera_backend: str = "mujoco",
     camera_gpu_id: int | None = None,
@@ -141,7 +142,7 @@ def make_env(
     """Create a MuJoCo YAM bimanual environment.
 
     Args:
-        task: Task scene — "bottles" (default), "inhand_transfer", etc.
+        task: Task scene, catalogue name, or a custom ``SimTaskSpec``.
         render_cameras: Whether to render camera images in observations.
         prompt: Task prompt string included in observations. Defaults to the
             resolved task prompt when available.
@@ -182,14 +183,6 @@ def make_env(
 
     resolved_task = resolve_task(task)
     env_task = resolved_task.env_task or task
-    resolved_prompt = prompt
-    if resolved_prompt is None:
-        if resolved_task.task_spec is not None:
-            resolved_prompt = resolved_task.task_spec.prompt
-        elif isinstance(task, str) and task:
-            resolved_prompt = task.replace("_", " ")
-        else:
-            resolved_prompt = "fold the towel"
 
     if env_task == "inhand_transfer":
         import numpy as _np
@@ -235,7 +228,7 @@ def make_env(
             render_cameras=render_cameras,
             camera_backend=camera_backend,
             camera_gpu_id=camera_gpu_id,
-            prompt=resolved_prompt,
+            prompt=prompt,
             chunk_dim=chunk_dim,
             scene_xml=None,
             **physics_kwargs,
@@ -288,7 +281,7 @@ def make_env(
             render_cameras=render_cameras,
             camera_backend=camera_backend,
             camera_gpu_id=camera_gpu_id,
-            prompt=resolved_prompt,
+            prompt=prompt,
             chunk_dim=chunk_dim,
             scene_xml=scene_xml_path,
             **physics_kwargs,
@@ -297,9 +290,6 @@ def make_env(
         if tmp_scene_xml_path is not None:
             tmp_scene_xml_path.unlink(missing_ok=True)
     env.set_task(task)
-    env._task_reset_request = (
-        resolved_task.task_spec.reset_request_options() if resolved_task.task_spec is not None else None
-    )
     env._scene_xml_transform_options = scene_xml_transform_options
     if scene_xml_string is not None:
         env._scene_xml_string = scene_xml_string

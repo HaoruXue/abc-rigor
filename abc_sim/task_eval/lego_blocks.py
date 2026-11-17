@@ -196,6 +196,7 @@ class LegoBlocksSortingEvaluator:
         metrics.update(
             {
                 "num_correct": num_correct,
+                "active_object_count": total_blocks,
                 "num_wrong_bin": num_wrong_bin,
                 "ever_success": self._ever_success.copy(),
                 "goal_tolerance_m": np.full(qpos_batch.shape[0], self.goal_tolerance_m),

@@ -63,7 +63,10 @@ class BallTrayBalancingEvaluator:
     back below the lift height, dips included; touchdown must follow within
     ``max_lowering_s``. A gentle placement touches down with both handles
     gripped (``require_handles_at_touchdown``), and the ball then stays on the
-    tray, untouched, for ``settle_s``.
+    tray, untouched, for ``settle_s``. Throughout that interval every control-rate
+    sample must show table contact with the tray below the lift height. Contact
+    loss or a relift restarts the settling timer at the next placed sample, so
+    a placement bounce can settle without counting the airborne interval.
 
     While up, the reward is 0.9 x air time / 10 s, 0.9 through 15 s, then falls
     to 0.5 over ``over_hold_decay_s``. Placing ends the attempt. Success needs
@@ -414,6 +417,7 @@ class BallTrayBalancingEvaluator:
                 "hold_duration_s": self._hold_duration_s.copy(),
                 "hold_window_s": np.full((self._nworld, 2), np.nan),
                 "hold_complete": self._hold_complete.copy(),
+                "perturbations_allowed": ~self._hold_complete,
                 "ball_lost_after_hold": self._ball_lost.copy(),
                 "ever_success": self._completed.copy(),
                 **self._shape_metrics(),
@@ -468,7 +472,7 @@ class BallTrayBalancingEvaluator:
             - self._hold_started_at,
             0.0,
         )
-        self._hold_complete = holding & (air_s >= low)
+        self._hold_complete |= holding & (air_s >= low)
 
         # The ball: before 10 s a problem restarts the hold, after it ends the attempt at 0.
         bad = holding & ~ball_ok
@@ -493,9 +497,8 @@ class BallTrayBalancingEvaluator:
         gripped = np.asarray(metrics["both_handles_gripped"], dtype=bool)
         self._handles_seen_at[gripped] = now[gripped]
         handles_held = now - self._handles_seen_at <= _HANDLE_GRACE_S
-        touchdown = (
-            holding & ~lifted & np.asarray(metrics["tray_table_contact"], dtype=bool)
-        )
+        placed = ~lifted & np.asarray(metrics["tray_table_contact"], dtype=bool)
+        touchdown = holding & placed
         gentle = (
             handles_held
             if self.require_handles_at_touchdown
@@ -526,7 +529,11 @@ class BallTrayBalancingEvaluator:
             self._ball_lost |= spilled
             phase[spilled] = _DONE
             settling &= ~spilled
-        settled = settling & (now >= self._settle_until)
+        # Restart at recontact: sampled contact gaps and relifts cannot earn settling time.
+        self._settle_until[settling & ~placed] = np.nan
+        resettle = settling & placed & np.isnan(self._settle_until)
+        self._settle_until[resettle] = now[resettle] + self.settle_s
+        settled = settling & placed & (now >= self._settle_until)
         succeeded = settled & self._touch_in_window
         self._completed |= succeeded
         # Full reward inside the prompt's window, then down to 0.8 at max_hold_s.
@@ -568,6 +575,9 @@ class BallTrayBalancingEvaluator:
                     np.asarray(self.hold_window_s), (self._nworld, 2)
                 ).copy(),
                 "hold_complete": self._hold_complete.copy(),
+                "perturbations_allowed": (
+                    ((phase == _IDLE) | (phase == _HOLDING)) & ~self._hold_complete
+                ),
                 "ball_lost_after_hold": self._ball_lost.copy(),
                 "handles_held": handles_held,
                 "settling": phase == _SETTLING,
