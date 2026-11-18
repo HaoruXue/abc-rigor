@@ -59,7 +59,10 @@ class GripperContactsTest(unittest.TestCase):
         }
         self.assertEqual(len(pads), 8)
         for arm in ("left", "right"):
+            arm_pads = {geom for geom in pads if model.body(int(model.geom_bodyid[geom])).name.startswith(arm + "_")}
+            self.assertEqual(len(arm_pads), 4)
             pad_materials = set()
+            loaded_pad_materials = set()
             for offset in (0.017, 0.030, 0.044):
                 with self.subTest(part=body_name, arm=arm, offset=offset):
                     measurements, materials = self._measure_lift(
@@ -73,6 +76,7 @@ class GripperContactsTest(unittest.TestCase):
                         pads,
                     )
                     pad_materials.update(materials)
+                    loaded_pad_materials.update(measurements["loaded_pad_materials"])
                     self.assertTrue(measurements["finite"], measurements)
                     self.assertGreater(measurements["contacts"], 0, measurements)
                     self.assertLess(measurements["penetration_mm"], 1.5, measurements)
@@ -87,6 +91,12 @@ class GripperContactsTest(unittest.TestCase):
                     np.testing.assert_allclose(solref, [0.004, 1])
                     np.testing.assert_allclose(solimp, [0.998, 0.998, 0.001, 0.5, 2])
                     np.testing.assert_allclose(friction, [4, 4, 0.1, 0.01, 0.01])
+            with self.subTest(part=body_name, arm=arm, check="loaded_pad_coverage"):
+                self.assertSetEqual(
+                    {pad for pad, *_ in loaded_pad_materials},
+                    arm_pads,
+                    f"Gravity-loaded pad observations: {sorted(loaded_pad_materials)}",
+                )
 
     def _measure_lift(
         self,
@@ -138,6 +148,7 @@ class GripperContactsTest(unittest.TestCase):
         contact_count = 0
         max_penetration = 0.0
         pad_materials = set()
+        loaded_pad_materials = set()
 
         def step() -> None:
             nonlocal contact_count, max_penetration
@@ -148,13 +159,11 @@ class GripperContactsTest(unittest.TestCase):
                     contact_count += 1
                     max_penetration = max(max_penetration, -float(contact.dist))
                     if pair & pads:
-                        pad_materials.add(
-                            (
-                                tuple(contact.solref),
-                                tuple(contact.solimp),
-                                tuple(contact.friction),
-                            )
-                        )
+                        material = tuple(contact.solref), tuple(contact.solimp), tuple(contact.friction)
+                        pad_materials.add(material)
+                        # The shared fixture restores gravity for the loaded lift.
+                        if np.any(model.opt.gravity):
+                            loaded_pad_materials.update((int(pad), *material) for pad in pair & pads)
 
         start_site = close_and_lift(self, model, data, arm, gravity, step, close_seconds=close_seconds)
         site = data.site(site_id)
@@ -168,6 +177,7 @@ class GripperContactsTest(unittest.TestCase):
             "retention_error_mm": retention_error * 1000,
             "part_lift_mm": part_lift * 1000,
             "tcp_lift_mm": tcp_lift * 1000,
+            "loaded_pad_materials": sorted(loaded_pad_materials),
         }
         return measurements, pad_materials
 
