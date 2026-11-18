@@ -8,6 +8,7 @@ from typing import Any
 import mujoco
 import numpy as np
 
+from abc_sim.background import background_material_ids, background_texture_ids
 from abc_sim.env import _GRIPPER_CTRL_MAX, MuJoCoYAMEnv, project_policy_state_batch
 from abc_sim.randomization.core import RandomizationSamplingError
 from abc_sim.rendering.replay.renderer import (
@@ -97,6 +98,7 @@ class BatchedWarpYAMEnv:
         camera_height: int,
         camera_width: int,
         gpu_id: int | None = None,
+        background_pool_size: int = 64,
     ):
         if num_worlds < 1:
             raise ValueError(f"num_worlds must be >= 1, got {num_worlds}")
@@ -124,6 +126,13 @@ class BatchedWarpYAMEnv:
         self._runtime: WarpReplayRuntime | None = None
         self._renderer: RendererWrapper | None = None
         self._evaluator = None
+        # Background variations: world w shows texture set w % n_sets (set 0 in the model, the rest only
+        # in the render context); every set is redrawn from the background stream on each reset.
+        self._background = base_env._background
+        self._background_sets = max(1, min(num_worlds, background_pool_size))
+        if self._background is not None:  # every reset redraws all sets: keep the package's slot images
+            self._background.library.slot_cache = 1 << 20
+        self.background_info: list[dict[str, Any]] | None = None
 
     @property
     def model(self) -> mujoco.MjModel:
@@ -141,14 +150,17 @@ class BatchedWarpYAMEnv:
                 "Per-episode block textures require independent environments; "
                 "the batched renderer shares texture buffers across worlds."
             )
+        base_options = options
+        if options is not None and "background_id" in options:  # the batch draws its own backgrounds
+            base_options = {k: v for k, v in options.items() if k != "background_id"}
         snapshots = []
         for index, seed in enumerate(seeds):
             try:
-                self.base_env.reset(seed=seed, options=options, randomize=True)
+                self.base_env.reset(seed=seed, options=base_options, randomize=True)
             except RandomizationSamplingError:
                 seed += 100_000
                 print(f"seed {seed - 100_000} unplaceable, resampled -> {seed}", flush=True)
-                self.base_env.reset(seed=seed, options=options, randomize=True)
+                self.base_env.reset(seed=seed, options=base_options, randomize=True)
             self.seeds[index] = seed
             self.randomization[index] = self.base_env._last_randomization
             self.prompts[index] = self.base_env.prompt
@@ -178,6 +190,8 @@ class BatchedWarpYAMEnv:
             time=stacked["time"],
         )
         self._runtime.forward()
+        if self._background is not None:
+            self._apply_backgrounds((options or {}).get("background_id"))
         self.qpos = stacked["qpos"]
         if isinstance(self._evaluator, PerWorldEvaluators):
             self._evaluator.reset(self.model, self.randomization)
@@ -192,6 +206,32 @@ class BatchedWarpYAMEnv:
                 if hasattr(self._evaluator, method):
                     getattr(self._evaluator, method)([state.metadata[key] for state in self.randomization])
         return self.get_obs()
+
+    def _apply_backgrounds(self, background_id: int | None = None) -> None:
+        """Draw one background per texture set and point every world's background materials at its set.
+
+        Set 0 replaces the model's four background textures; further sets exist only in the render
+        context, appended after the model's textures.
+        """
+        mjm = self._runtime.mjm
+        slots = background_texture_ids(mjm)
+        materials = background_material_ids(mjm)
+        draws = self._background.draw_sets(self._background_sets, background_id)
+        images, gains, texids = {}, {}, []
+        for j, (_, slot_images) in enumerate(draws):
+            ids = {k: tid if j == 0 else mjm.ntex + (j - 1) * len(slots) + i for i, (k, tid) in enumerate(slots.items())}
+            for k, tid in ids.items():
+                images[tid] = slot_images[k]
+                gains[tid] = self._background.mjwarp_gain(k)
+            texids.append(ids)
+        self._renderer.update_textures(images, gains)
+        mat_texid = np.repeat(mjm.mat_texid[None], self.num_worlds, axis=0)
+        rgb = mujoco.mjtTextureRole.mjTEXROLE_RGB
+        for world in range(self.num_worlds):
+            for slot, mat in materials.items():
+                mat_texid[world, mat, rgb] = texids[world % len(draws)][slot]
+        self._runtime.set_mat_texid(mat_texid)
+        self.background_info = [self._background.info_of(draws[w % len(draws)][0]) for w in range(self.num_worlds)]
 
     def _snapshot(self) -> dict[str, Any]:
         model, data = self.base_env.model, self.base_env.data
